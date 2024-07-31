@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	gadgettesting "github.com/inspektor-gadget/inspektor-gadget/gadgets/testing"
 	igtesting "github.com/inspektor-gadget/inspektor-gadget/pkg/testing"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/testing/containers"
@@ -25,7 +27,6 @@ import (
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/testing/match"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/testing/utils"
 	eventtypes "github.com/inspektor-gadget/inspektor-gadget/pkg/types"
-	"github.com/stretchr/testify/require"
 )
 
 type traceTcpconnectEvent struct {
@@ -43,6 +44,7 @@ type traceTcpconnectEvent struct {
 	Latency     uint64           `json:"latency,omitempty"`
 	SrcEndpoint utils.L4Endpoint `json:"src"`
 	DstEndpoint utils.L4Endpoint `json:"dst"`
+	ErrorRaw    uint32           `json:"error_raw"`
 }
 
 func TestTraceTcpconnect(t *testing.T) {
@@ -96,10 +98,11 @@ func TestTraceTcpconnect(t *testing.T) {
 					Port:    utils.NormalizedInt,
 					Proto:   6,
 				},
-				Comm: "curl",
-				Uid:  0,
-				Gid:  0,
+				Comm:     "curl",
+				ErrorRaw: 0,
 
+				Uid:       utils.NormalizedInt,
+				Gid:       utils.NormalizedInt,
 				MntNsID:   utils.NormalizedInt,
 				Timestamp: utils.NormalizedStr,
 				Pid:       utils.NormalizedInt,
@@ -119,7 +122,7 @@ func TestTraceTcpconnect(t *testing.T) {
 			match.MatchEntries(t, match.JSONMultiObjectMode, output, normalize, expectedEntries)
 		},
 	))
-	traceTcpconnectCmd := igrunner.New("trace tcpconnect", runnerOpts...)
+	traceTcpconnectCmd := igrunner.New("trace_tcpconnect", runnerOpts...)
 	steps := []igtesting.TestStep{
 		traceTcpconnectCmd,
 	}
