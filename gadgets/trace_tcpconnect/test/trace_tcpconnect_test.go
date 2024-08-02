@@ -38,11 +38,14 @@ type traceTcpconnectEvent struct {
 	Comm string `json:"comm"`
 	Pid  uint32 `json:"pid"`
 	Tid  uint32 `json:"tid"`
+	Uid  uint32 `json:"uid"`
+	Gid  uint32 `json:"gid"`
 
 	Latency     uint64           `json:"latency,omitempty"`
 	SrcEndpoint utils.L4Endpoint `json:"src"`
 	DstEndpoint utils.L4Endpoint `json:"dst"`
-	ErrorRaw    uint32           `json:"error_raw"`
+	//error_raw is not taken due to "EINPROGRESS" / 115 error with use of curl.
+	//take a look at: https://www.man7.org/linux/man-pages/man2/connect.2.html
 }
 
 func TestTraceTcpconnect(t *testing.T) {
@@ -96,8 +99,10 @@ func TestTraceTcpconnect(t *testing.T) {
 					Port:    utils.NormalizedInt,
 					Proto:   6,
 				},
-				Comm:      "curl",
-				ErrorRaw:  0,
+				Comm: "curl",
+
+				Uid:       0,
+				Gid:       0,
 				MntNsID:   utils.NormalizedInt,
 				Timestamp: utils.NormalizedStr,
 				Pid:       utils.NormalizedInt,
@@ -112,6 +117,9 @@ func TestTraceTcpconnect(t *testing.T) {
 				utils.NormalizeInt(&e.Tid)
 				utils.NormalizeInt(&e.SrcEndpoint.Port)
 				utils.NormalizeInt(&e.DstEndpoint.Port)
+				//Manually normalizing the Uid and Gid as they may contain 0
+				e.Uid = 0
+				e.Gid = 0
 			}
 
 			match.MatchEntries(t, match.JSONMultiObjectMode, output, normalize, expectedEntries)
