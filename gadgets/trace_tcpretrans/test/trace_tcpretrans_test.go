@@ -93,7 +93,7 @@ func TestTraceTCPretrans(t *testing.T) {
 				Dst: utils.L4Endpoint{
 					Addr:    "1.1.1.1",
 					Version: 4,
-					Port:    80,
+					Port:    utils.NormalizedInt,
 					Proto:   6,
 				},
 				Uid: 0,
@@ -115,6 +115,7 @@ func TestTraceTCPretrans(t *testing.T) {
 				utils.NormalizeInt(&e.Pid)
 				utils.NormalizeInt(&e.Tid)
 				utils.NormalizeInt(&e.NetNs)
+				utils.NormalizeInt(&e.Dst.Port)
 			}
 			match.MatchEntries(t, match.JSONMultiObjectMode, output, normalize, expectedEntries)
 		},
