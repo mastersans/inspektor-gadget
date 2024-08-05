@@ -115,6 +115,7 @@ func TestTraceTCPretrans(t *testing.T) {
 				utils.NormalizeInt(&e.Pid)
 				utils.NormalizeInt(&e.Tid)
 				utils.NormalizeInt(&e.NetNs)
+				utils.NormalizeInt(&e.Dst.Port)
 			}
 			match.MatchEntries(t, match.JSONMultiObjectMode, output, normalize, expectedEntries)
 		},
