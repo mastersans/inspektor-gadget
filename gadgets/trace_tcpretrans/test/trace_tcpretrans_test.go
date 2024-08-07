@@ -43,6 +43,7 @@ type traceTCPretransEvent struct {
 
 	Comm string           `json:"comm"`
 	Type string           `json:"type"`
+	Src  utils.L4Endpoint `json:"src"`
 	Dst  utils.L4Endpoint `json:"dst"`
 }
 
@@ -50,21 +51,25 @@ func TestTraceTCPretrans(t *testing.T) {
 	gadgettesting.RequireEnvironmentVariables(t)
 	utils.InitTest(t)
 
+	if utils.CurrentTestComponent == utils.KubectlGadgetTestComponent {
+		t.Skip("Skipping test as K8s doesn't support privileged containers")
+	}
+
 	containerFactory, err := containers.NewContainerFactory(utils.Runtime)
 	require.NoError(t, err, "new container factory")
 	containerName := "test-trace-tcpretrans"
-	containerImage := "wbitt/network-multitool:latest"
+	containerImage := "docker.io/wbitt/network-multitool:latest"
 
 	var ns string
-	//run the container with privileged mode to be able to use tc command
+	// run the container with privileged mode to be able to use tc command
 	containerOpts := []containers.ContainerOption{containers.WithContainerImage(containerImage), containers.WithPrivileged()}
 
 	if utils.CurrentTestComponent == utils.KubectlGadgetTestComponent {
 		ns = utils.GenerateTestNamespaceName(t, "test-trace-tcpretrans")
 		containerOpts = append(containerOpts, containers.WithContainerNamespace(ns))
 	}
-	//for testing purpose drop 25% of packets and wget 1.1.1.1 every 0.1 seconds
-	cmds := "tc qdisc add dev eth0 root netem drop 30% && while true; do wget --no-check-certificate -q -O /dev/null 1.1.1.1; sleep 0.1; done"
+	// for testing purpose drop 30% of packets and wget 1.1.1.1 every 0.1 seconds
+	cmds := "tc qdisc add dev eth0 root netem drop 30% && while true; do wget --no-check-certificate -q -O /dev/null https://1.1.1.1; sleep 0.1; done"
 	testContainer := containerFactory.NewContainer(
 		containerName,
 		cmds,
@@ -90,10 +95,16 @@ func TestTraceTCPretrans(t *testing.T) {
 		func(t *testing.T, output string) {
 			expectedEntries := &traceTCPretransEvent{
 				CommonData: utils.BuildCommonData(containerName, commonDataOpts...),
+				Src: utils.L4Endpoint{
+					Addr:    utils.NormalizedStr,
+					Version: 4,
+					Port:    utils.NormalizedInt,
+					Proto:   6,
+				},
 				Dst: utils.L4Endpoint{
 					Addr:    "1.1.1.1",
 					Version: 4,
-					Port:    utils.NormalizedInt,
+					Port:    443,
 					Proto:   6,
 				},
 				Uid: 0,
@@ -115,7 +126,8 @@ func TestTraceTCPretrans(t *testing.T) {
 				utils.NormalizeInt(&e.Pid)
 				utils.NormalizeInt(&e.Tid)
 				utils.NormalizeInt(&e.NetNs)
-				utils.NormalizeInt(&e.Dst.Port)
+				utils.NormalizeString(&e.Src.Addr)
+				utils.NormalizeInt(&e.Src.Port)
 			}
 			match.MatchEntries(t, match.JSONMultiObjectMode, output, normalize, expectedEntries)
 		},
