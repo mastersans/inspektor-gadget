@@ -53,6 +53,8 @@ func TestTraceTCPretrans(t *testing.T) {
 
 	if utils.CurrentTestComponent == utils.KubectlGadgetTestComponent {
 		t.Skip("Skipping test as K8s doesn't support privileged containers")
+	} else if utils.CurrentTestComponent == utils.IgLocalTestComponent && utils.Runtime == "containerd" {
+		t.Skip("Skipping test as containerd test utils can't use the network")
 	}
 
 	containerFactory, err := containers.NewContainerFactory(utils.Runtime)
