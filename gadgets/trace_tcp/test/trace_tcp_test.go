@@ -126,6 +126,7 @@ func TestTraceTcpGadget(t *testing.T) {
 			t.Parallel()
 			params := map[string]string{
 				"operator.LocalManager.host": "true",
+				"operator.oci.verify-image":  "false",
 			}
 			runner := utilstest.NewRunnerWithTest(t, testCase.runnerConfig)
 			Opts := gadgetrunner.GadgetOpts[ExpectedTraceTcpEvent]{

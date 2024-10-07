@@ -242,7 +242,8 @@ func TestTraceOpenGadget(t *testing.T) {
 			var fd int
 			runner := utilstest.NewRunnerWithTest(t, testCase.runnerConfig)
 			apiParams := map[string]string{
-				"operator.oci.ebpf.uid": "0",
+				"operator.oci.ebpf.uid":     "0",
+				"operator.oci.verify-image": "false",
 			}
 			var mntsFilterMap *ebpf.Map
 			if testCase.mntsFilterMap != nil {

@@ -122,11 +122,14 @@ func TestSnapshotProcessGadget(t *testing.T) {
 			if testCase.mntnsFilterMap != nil {
 				filterMap = testCase.mntnsFilterMap(runner.Info)
 			}
+			params := map[string]string{
+				"operator.oci.verify-image": "false",
+			}
 			Opts := gadgetrunner.GadgetOpts[ExpectedSnapshotProcessEvent]{
 				Image:        "snapshot_process",
 				Timeout:      5 * time.Second,
 				MnsFilterMap: filterMap,
-				ApiParams:    nil,
+				ApiParams:    params,
 			}
 			gdgt := gadgetrunner.NewGadget(t, Opts)
 
