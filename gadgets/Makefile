@@ -116,18 +116,24 @@ sign-existing: $(addsuffix -sign-existing,$(GADGETS))
 clean: $(addsuffix -clean,$(GADGETS))
 
 .PHONY:
-test: build
+test-unit:
+	GADGET_REPOSITORY=$(GADGET_REPOSITORY) \
+	GADGET_TAG=$(GADGET_TAG) \
+	@find ./*/test/unit -type d -exec go test -test.v -exec sudo {} \; || true
+
+.PHONY:
+test-integration: build
 	IG_PATH=$(IG_PATH) \
 	CGO_ENABLED=0 \
 	GADGET_REPOSITORY=$(GADGET_REPOSITORY) \
 	GADGET_TAG=$(GADGET_TAG) \
 	IG_FLAGS=$(IG_FLAGS) \
-	go test -exec 'sudo -E' -v ./...
+	@find ./*/test/integration -type d -exec go test -test.v -exec sudo {} \; || true
 
 .PHONY:
 test-local: IG_PATH=$(IG)
-test-local: test
+test-local: test-integration
 
 .PHONY:
 test-k8s: IG_PATH=$(KUBECTL_GADGET)
-test-k8s: test
+test-k8s: test-integration

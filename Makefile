@@ -383,7 +383,7 @@ push-gadgets: install/ig
 
 .PHONY: test-gadgets
 test-gadgets: install/ig
-	$(MAKE) -C gadgets/ test
+	$(MAKE) -C gadgets/ test-integration
 
 .PHONY: testdata
 testdata:
