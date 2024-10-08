@@ -25,6 +25,7 @@ import (
 
 	utilstest "github.com/inspektor-gadget/inspektor-gadget/internal/test"
 	containerutils "github.com/inspektor-gadget/inspektor-gadget/pkg/container-utils"
+	"github.com/inspektor-gadget/inspektor-gadget/pkg/gadget-service/api"
 	_ "github.com/inspektor-gadget/inspektor-gadget/pkg/operators/ebpf"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/testing/gadgetrunner"
 )
@@ -122,11 +123,14 @@ func TestSnapshotProcessGadget(t *testing.T) {
 			if testCase.mntnsFilterMap != nil {
 				filterMap = testCase.mntnsFilterMap(runner.Info)
 			}
+			apiParams := api.ParamValues{
+				"operator.oci.verify-image": "false",
+			}
 			Opts := gadgetrunner.GadgetOpts[ExpectedSnapshotProcessEvent]{
 				Image:        "snapshot_process",
 				Timeout:      5 * time.Second,
 				MnsFilterMap: filterMap,
-				ApiParams:    nil,
+				ApiParams:    apiParams,
 			}
 			gdgt := gadgetrunner.NewGadget(t, Opts)
 

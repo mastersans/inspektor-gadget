@@ -101,6 +101,7 @@ func TestTopFileGadget(t *testing.T) {
 			params := map[string]string{
 				"operator.oci.ebpf.map-fetch-interval": "1000ms",
 				"operator.LocalManager.host":           "true",
+				"operator.oci.verify-image":            "false",
 			}
 
 			var MnsFilterMap *ebpf.Map
