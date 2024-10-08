@@ -122,7 +122,7 @@ test-unit:
 	find ./*/test/unit -type d -exec go test -test.v -exec sudo {} \; || true
 
 .PHONY:
-test-integration: build
+test: build
 	IG_PATH=$(IG_PATH) \
 	CGO_ENABLED=0 \
 	GADGET_REPOSITORY=$(GADGET_REPOSITORY) \
@@ -132,8 +132,8 @@ test-integration: build
 
 .PHONY:
 test-local: IG_PATH=$(IG)
-test-local: test-integration
+test-local: test
 
 .PHONY:
 test-k8s: IG_PATH=$(KUBECTL_GADGET)
-test-k8s: test-integration
+test-k8s: test
