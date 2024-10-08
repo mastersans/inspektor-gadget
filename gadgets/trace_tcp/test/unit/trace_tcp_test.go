@@ -54,7 +54,7 @@ type testDef struct {
 func TestTraceTcpGadget(t *testing.T) {
 	utilstest.RequireRoot(t)
 	testCases := map[string]testDef{
-		"captures_all_events_1": {
+		"captures_all_events": {
 			addr:          "127.0.0.1",
 			port:          9070,
 			runnerConfig:  &utilstest.RunnerConfig{},
@@ -87,39 +87,6 @@ func TestTraceTcpGadget(t *testing.T) {
 				return nil
 			},
 		},
-		"captures_all_events_2": {
-			addr:          "127.0.0.1",
-			port:          9160,
-			runnerConfig:  &utilstest.RunnerConfig{},
-			generateEvent: generateEvent,
-			validateEvent: func(t *testing.T, info *utilstest.RunnerInfo, fd int, events []ExpectedTraceTcpEvent) error {
-				utilstest.ExpectAtLeastOneEvent(func(info *utilstest.RunnerInfo, pid int) *ExpectedTraceTcpEvent {
-					return &ExpectedTraceTcpEvent{
-						Comm:    info.Comm,
-						Pid:     info.Pid,
-						Tid:     info.Tid,
-						Uid:     0,
-						Gid:     0,
-						Type:    "close",
-						MntNsId: int(info.MountNsID),
-						NetNsId: int(info.NetworkNsID),
-						Src: utils.L4Endpoint{
-							Addr:    "127.0.0.1",
-							Version: 4,
-							Port:    utils.NormalizedInt,
-							Proto:   6,
-						},
-						Dst: utils.L4Endpoint{
-							Addr:    "127.0.0.1",
-							Version: 4,
-							Port:    9160,
-							Proto:   6,
-						},
-					}
-				})(t, info, fd, events)
-				return nil
-			},
-		},
 	}
 	for name, testCase := range testCases {
 		t.Run(name, func(t *testing.T) {
@@ -128,19 +95,11 @@ func TestTraceTcpGadget(t *testing.T) {
 				"operator.LocalManager.host": "true",
 			}
 			runner := utilstest.NewRunnerWithTest(t, testCase.runnerConfig)
-			Opts := gadgetrunner.GadgetOpts[ExpectedTraceTcpEvent]{
-				Image:        "trace_tcp",
-				Timeout:      5 * time.Second,
-				MnsFilterMap: nil,
-				ApiParams:    params,
-			}
-
-			gdgt := gadgetrunner.NewGadget(t, Opts)
-			gdgt.NormalizeEvent = func(event *ExpectedTraceTcpEvent) {
+			normalizeEvent := func(event *ExpectedTraceTcpEvent) {
 				utils.NormalizeInt(&event.Src.Port)
 			}
 
-			gdgt.OnGadgetRun = func(gadgetCtx operators.GadgetContext) error {
+			onGadgetRun := func(gadgetCtx operators.GadgetContext) error {
 				utilstest.RunWithRunner(t, runner, func() error {
 					testCase.generateEvent(t, testCase.addr, testCase.port)
 					return nil
@@ -148,9 +107,19 @@ func TestTraceTcpGadget(t *testing.T) {
 				return nil
 			}
 
-			gdgt.RunGadget()
+			Opts := gadgetrunner.GadgetOpts[ExpectedTraceTcpEvent]{
+				Image:          "trace_tcp",
+				Timeout:        5 * time.Second,
+				ParamValues:    params,
+				OnGadgetRun:    onGadgetRun,
+				NormalizeEvent: normalizeEvent,
+			}
 
-			testCase.validateEvent(t, runner.Info, 0, gdgt.CapturedEvents)
+			gadgetRunner := gadgetrunner.NewGadget(t, Opts)
+
+			gadgetRunner.RunGadget()
+
+			testCase.validateEvent(t, runner.Info, 0, gadgetRunner.CapturedEvents)
 		})
 	}
 }

@@ -16,16 +16,14 @@ package tests
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/cilium/ebpf"
-	"github.com/stretchr/testify/require"
 
 	utilstest "github.com/inspektor-gadget/inspektor-gadget/internal/test"
-	_ "github.com/inspektor-gadget/inspektor-gadget/pkg/operators/ebpf"
+	"github.com/inspektor-gadget/inspektor-gadget/pkg/operators"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/testing/gadgetrunner"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/testing/utils"
 )
@@ -47,10 +45,10 @@ type ExpectedTopFileEvent struct {
 }
 
 type testDef struct {
-	runnerConfig  *utilstest.RunnerConfig
-	generateEvent func(t *testing.T) string
-	validateEvent func(t *testing.T, info *utilstest.RunnerInfo, filepath string, events []ExpectedTopFileEvent)
-	mnsFilterMap  func(info *utilstest.RunnerInfo) *ebpf.Map
+	runnerConfig   *utilstest.RunnerConfig
+	generateEvent  func() (string, error)
+	validateEvent  func(t *testing.T, info *utilstest.RunnerInfo, filepath string, events []ExpectedTopFileEvent)
+	mntnsFilterMap func(info *utilstest.RunnerInfo) *ebpf.Map
 }
 
 func TestTopFileGadget(t *testing.T) {
@@ -61,13 +59,13 @@ func TestTopFileGadget(t *testing.T) {
 		"captures_events_with_filter": {
 			runnerConfig:  runnerConfig,
 			generateEvent: generateEvent,
-			mnsFilterMap: func(info *utilstest.RunnerInfo) *ebpf.Map {
+			mntnsFilterMap: func(info *utilstest.RunnerInfo) *ebpf.Map {
 				return utilstest.CreateMntNsFilterMap(t, info.MountNsID)
 			},
 			validateEvent: func(t *testing.T, info *utilstest.RunnerInfo, filepath string, events []ExpectedTopFileEvent) {
 				utilstest.ExpectAtLeastOneEvent(func(info *utilstest.RunnerInfo, pid int) *ExpectedTopFileEvent {
 					return &ExpectedTopFileEvent{
-						Comm: "bash",
+						Comm: info.Comm,
 						T:    "R",
 						File: filepath,
 
@@ -77,7 +75,6 @@ func TestTopFileGadget(t *testing.T) {
 
 						// Only check the existence.
 						Writes: utils.NormalizedInt,
-						WBytes: utils.NormalizedInt,
 
 						MntnsID: info.MountNsID,
 						Uid:     0,
@@ -87,6 +84,7 @@ func TestTopFileGadget(t *testing.T) {
 						// Nothing is being read from the file.
 						Reads:  0,
 						RBytes: 0,
+						WBytes: 10240,
 					}
 				})(t, info, 0, events)
 			},
@@ -103,60 +101,59 @@ func TestTopFileGadget(t *testing.T) {
 				"operator.LocalManager.host":           "true",
 			}
 
-			var MnsFilterMap *ebpf.Map
-			if testCase.mnsFilterMap != nil {
-				MnsFilterMap = testCase.mnsFilterMap(runner.Info)
+			var mntnsFilterMap *ebpf.Map
+			if testCase.mntnsFilterMap != nil {
+				mntnsFilterMap = testCase.mntnsFilterMap(runner.Info)
 			}
-			Opts := gadgetrunner.GadgetOpts[ExpectedTopFileEvent]{
-				Image:        "top_file",
-				Timeout:      5 * time.Second,
-				MnsFilterMap: MnsFilterMap,
-				ApiParams:    params,
-			}
-
-			gdgt := gadgetrunner.NewGadget(t, Opts)
-			gdgt.NormalizeEvent = func(event *ExpectedTopFileEvent) {
+			normalizeEvent := func(event *ExpectedTopFileEvent) {
 				utils.NormalizeInt(&event.Tid)
 				utils.NormalizeInt(&event.Pid)
-				utils.NormalizeInt(&event.WBytes)
 				utils.NormalizeInt(&event.Writes)
 			}
-			gdgt.BeforeGadgetRun = func() error {
+			onGadgetRun := func(gadgetCtx operators.GadgetContext) error {
 				utilstest.RunWithRunner(t, runner, func() error {
-					filepath = testCase.generateEvent(t)
+					var err error
+					filepath, err = testCase.generateEvent()
+					if err != nil {
+						return err
+					}
 					return nil
 				})
 				return nil
 			}
+			opts := gadgetrunner.GadgetOpts[ExpectedTopFileEvent]{
+				Image:          "top_file",
+				Timeout:        5 * time.Second,
+				MntnsFilterMap: mntnsFilterMap,
+				ParamValues:    params,
+				OnGadgetRun:    onGadgetRun,
+				NormalizeEvent: normalizeEvent,
+			}
 
-			gdgt.RunGadget()
+			gadgetRunner := gadgetrunner.NewGadget(t, opts)
 
-			testCase.validateEvent(t, runner.Info, filepath, gdgt.CapturedEvents)
+			gadgetRunner.RunGadget()
+
+			testCase.validateEvent(t, runner.Info, filepath, gadgetRunner.CapturedEvents)
 		})
 	}
 }
-func generateEvent(t *testing.T) string {
-	wd, err := os.Getwd()
-	require.NoError(t, err, "getting current working directory")
 
-	filepath := filepath.Join(wd, "bar")
+func generateEvent() (string, error) {
+	temp, err := os.MkdirTemp("", "test")
+	if err != nil {
+		return "", err
+	}
+	filepath := filepath.Join(temp, "foo")
 	file, err := os.Create(filepath)
-	require.NoError(t, err, "creating file")
+	if err != nil {
+		return "", err
+	}
 
-	defer func() {
-		err := file.Close()
-		require.NoError(t, err, "closing file")
-	}()
-
-	// Set up the command to continuously write to the file with a 5 seconds timeout
-	cmd := exec.Command("bash", "-c", "timeout 5 bash -c 'while true; do echo -n foo > bar; sleep 0.3; done'")
-	cmd.Dir = wd
-	err = cmd.Start()
-	require.NoError(t, err, "starting command")
-
-	t.Cleanup(func() {
-		os.Remove(filepath)
-	})
-
-	return filepath
+	buf := make([]byte, 10240)
+	_, err = file.Write(buf)
+	if err != nil {
+		return "", err
+	}
+	return filepath, nil
 }

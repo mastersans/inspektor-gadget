@@ -32,6 +32,7 @@ import (
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/gadget-service/api"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/gadgets"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/operators"
+	_ "github.com/inspektor-gadget/inspektor-gadget/pkg/operators/ebpf"
 	formatters "github.com/inspektor-gadget/inspektor-gadget/pkg/operators/formatters"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/operators/localmanager"
 	ocihandler "github.com/inspektor-gadget/inspektor-gadget/pkg/operators/oci-handler"
@@ -42,19 +43,23 @@ import (
 )
 
 type GadgetOpts[T any] struct {
-	Image        string
-	Timeout      time.Duration
-	MnsFilterMap *ebpf.Map
-	ApiParams    api.ParamValues
+	Image          string
+	Timeout        time.Duration
+	MntnsFilterMap *ebpf.Map
+	ParamValues    api.ParamValues
+
+	OnGadgetRun     func(gadgetCtx operators.GadgetContext) error
+	BeforeGadgetRun func() error
+	NormalizeEvent  func(event *T)
 }
 
 type GadgetRunner[T any] struct {
-	image         string
-	timeout       time.Duration
-	mnsFilterMap  *ebpf.Map
-	apiParams     api.ParamValues
-	runtimeParams *params.Params
-	TestCtx       *testing.T
+	image          string
+	timeout        time.Duration
+	mntnsFilterMap *ebpf.Map
+	apiParams      api.ParamValues
+	runtimeParams  *params.Params
+	TestCtx        *testing.T
 
 	gadgetCtx      *gadgetcontext.GadgetContext
 	gadgetOperator operators.DataOperator
@@ -63,9 +68,9 @@ type GadgetRunner[T any] struct {
 	JsonFormatter  *igjson.Formatter
 
 	CapturedEvents  []T
-	OnGadgetRun     func(gadgetCtx operators.GadgetContext) error
-	BeforeGadgetRun func() error
-	NormalizeEvent  func(event *T)
+	onGadgetRun     func(gadgetCtx operators.GadgetContext) error
+	beforeGadgetRun func() error
+	normalizeEvent  func(event *T)
 }
 
 // NewGadget initializes a new GadgetRunner
@@ -83,10 +88,14 @@ func NewGadget[T any](t *testing.T, opts GadgetOpts[T]) *GadgetRunner[T] {
 	return &GadgetRunner[T]{
 		image:          gadgetImage,
 		timeout:        opts.Timeout,
-		apiParams:      opts.ApiParams,
+		apiParams:      opts.ParamValues,
 		CapturedEvents: make([]T, 0),
-		mnsFilterMap:   opts.MnsFilterMap,
+		mntnsFilterMap: opts.MntnsFilterMap,
 		TestCtx:        t,
+
+		onGadgetRun:     opts.OnGadgetRun,
+		beforeGadgetRun: opts.BeforeGadgetRun,
+		normalizeEvent:  opts.NormalizeEvent,
 	}
 }
 
@@ -101,8 +110,8 @@ func (g *GadgetRunner[T]) RunGadget() {
 			err := json.Unmarshal(jsonOutput, event)
 			require.NoError(g.TestCtx, err, "unmarshalling event")
 
-			if g.NormalizeEvent != nil {
-				g.NormalizeEvent(event)
+			if g.normalizeEvent != nil {
+				g.normalizeEvent(event)
 			}
 
 			mu.Lock()
@@ -124,11 +133,11 @@ func (g *GadgetRunner[T]) RunGadget() {
 			return nil
 		}),
 	}
-	if g.mnsFilterMap != nil {
+	if g.mntnsFilterMap != nil {
 		gadgetOperatorOpts = append(gadgetOperatorOpts,
 			// On PreStart set the mount ns filter map
 			simple.OnPreStart(func(gadgetCtx operators.GadgetContext) error {
-				gadgetCtx.SetVar(gadgets.MntNsFilterMapName, g.mnsFilterMap)
+				gadgetCtx.SetVar(gadgets.MntNsFilterMapName, g.mntnsFilterMap)
 				gadgetCtx.SetVar(gadgets.FilterByMntNsName, true)
 
 				return nil
@@ -136,8 +145,8 @@ func (g *GadgetRunner[T]) RunGadget() {
 		)
 	}
 	// Only add OnStart option if OnGadgetRun is defined
-	if g.OnGadgetRun != nil {
-		gadgetOperatorOpts = append(gadgetOperatorOpts, simple.OnStart(g.OnGadgetRun))
+	if g.onGadgetRun != nil {
+		gadgetOperatorOpts = append(gadgetOperatorOpts, simple.OnStart(g.onGadgetRun))
 	}
 
 	g.gadgetOperator = simple.New("gadget", gadgetOperatorOpts...)
@@ -160,8 +169,8 @@ func (g *GadgetRunner[T]) RunGadget() {
 	require.NoError(g.TestCtx, err, "runtime initialization error")
 
 	// Run the gadget
-	if g.BeforeGadgetRun != nil {
-		err = g.BeforeGadgetRun()
+	if g.beforeGadgetRun != nil {
+		err = g.beforeGadgetRun()
 		require.NoError(g.TestCtx, err, "before gadget run error")
 	}
 	err = runtime.RunGadget(g.gadgetCtx, g.runtimeParams, g.apiParams)

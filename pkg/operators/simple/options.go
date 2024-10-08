@@ -41,6 +41,7 @@ func OnPreStart(cb func(gadgetCtx operators.GadgetContext) error) Option {
 		op.onPreStart = cb
 	}
 }
+
 func OnPostStop(cb func(gadgetCtx operators.GadgetContext) error) Option {
 	return func(op *simpleOperator) {
 		op.onPostStop = cb

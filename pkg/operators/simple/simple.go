@@ -90,6 +90,7 @@ func (s *simpleOperator) PreStart(gadgetCtx operators.GadgetContext) error {
 	}
 	return nil
 }
+
 func (s *simpleOperator) PostStop(gadgetCtx operators.GadgetContext) error {
 	if s.onPostStop != nil {
 		return s.onPostStop(gadgetCtx)

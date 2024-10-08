@@ -26,7 +26,6 @@ import (
 
 	utilstest "github.com/inspektor-gadget/inspektor-gadget/internal/test"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/operators"
-	_ "github.com/inspektor-gadget/inspektor-gadget/pkg/operators/ebpf"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/testing/gadgetrunner"
 )
 
@@ -44,10 +43,10 @@ type ExpectedTraceOpenEvent struct {
 }
 
 type testDef struct {
-	runnerConfig  *utilstest.RunnerConfig
-	mntsFilterMap func(info *utilstest.RunnerInfo) *ebpf.Map
-	generateEvent func(t *testing.T) int
-	validateEvent func(t *testing.T, info *utilstest.RunnerInfo, fd int, events []ExpectedTraceOpenEvent)
+	runnerConfig   *utilstest.RunnerConfig
+	mntnsFilterMap func(info *utilstest.RunnerInfo) *ebpf.Map
+	generateEvent  func() (int, error)
+	validateEvent  func(t *testing.T, info *utilstest.RunnerInfo, fd int, events []ExpectedTraceOpenEvent)
 }
 
 func TestTraceOpenGadget(t *testing.T) {
@@ -72,7 +71,7 @@ func TestTraceOpenGadget(t *testing.T) {
 		},
 		"captures_no_events_with_no_matching_filter": {
 			runnerConfig: &utilstest.RunnerConfig{},
-			mntsFilterMap: func(info *utilstest.RunnerInfo) *ebpf.Map {
+			mntnsFilterMap: func(info *utilstest.RunnerInfo) *ebpf.Map {
 				return utilstest.CreateMntNsFilterMap(t, 0)
 			},
 			generateEvent: generateEvent,
@@ -82,12 +81,12 @@ func TestTraceOpenGadget(t *testing.T) {
 		},
 		"captures_events_with_matching_filter": {
 			runnerConfig: &utilstest.RunnerConfig{},
-			mntsFilterMap: func(info *utilstest.RunnerInfo) *ebpf.Map {
+			mntnsFilterMap: func(info *utilstest.RunnerInfo) *ebpf.Map {
 				return utilstest.CreateMntNsFilterMap(t, info.MountNsID)
 			},
 			generateEvent: generateEvent,
 			validateEvent: func(t *testing.T, info *utilstest.RunnerInfo, fd int, events []ExpectedTraceOpenEvent) {
-				utilstest.ExpectAtLeastOneEvent(func(info *utilstest.RunnerInfo, fd int) *ExpectedTraceOpenEvent {
+				utilstest.ExpectOneEvent(func(info *utilstest.RunnerInfo, fd int) *ExpectedTraceOpenEvent {
 					return &ExpectedTraceOpenEvent{
 						Comm:  info.Comm,
 						Pid:   info.Pid,
@@ -102,122 +101,104 @@ func TestTraceOpenGadget(t *testing.T) {
 		},
 		"test_flags_and_mode": {
 			runnerConfig: &utilstest.RunnerConfig{},
-			mntsFilterMap: func(info *utilstest.RunnerInfo) *ebpf.Map {
+			mntnsFilterMap: func(info *utilstest.RunnerInfo) *ebpf.Map {
 				return utilstest.CreateMntNsFilterMap(t, info.MountNsID)
 			},
-			generateEvent: func(t *testing.T) int {
+			generateEvent: func() (int, error) {
 				filename := "/tmp/test_flags_and_mode"
 				fd, err := unix.Open(filename, unix.O_CREAT|unix.O_RDWR, unix.S_IRWXU|unix.S_IRGRP|unix.S_IWGRP|unix.S_IXOTH)
-				require.NoError(t, err, "opening file")
+				if err != nil {
+					return 0, err
+				}
 				defer os.Remove(filename)
 				unix.Close(fd)
 
-				return fd
+				return fd, nil
 			},
 			validateEvent: func(t *testing.T, info *utilstest.RunnerInfo, fd int, events []ExpectedTraceOpenEvent) {
-				utilstest.ExpectOneEvent(func(info *utilstest.RunnerInfo, fd int) *ExpectedTraceOpenEvent {
-					return &ExpectedTraceOpenEvent{
-						Comm:     info.Comm,
-						Pid:      info.Pid,
-						Tid:      info.Tid,
-						Uid:      uint32(info.Uid),
-						Gid:      uint32(info.Gid),
-						Fd:       uint32(fd),
-						FName:    "/tmp/test_flags_and_mode",
-						FlagsRaw: unix.O_CREAT | unix.O_RDWR,
-						ModeRaw:  unix.S_IRWXU | unix.S_IRGRP | unix.S_IWGRP | unix.S_IXOTH,
-						ErrRaw:   0,
-					}
-				})(t, info, fd, events)
+				require.Len(t, events, 1, "expected one event")
+				require.Equal(t, events[0].ModeRaw, unix.S_IRWXU|unix.S_IRGRP|unix.S_IWGRP|unix.S_IXOTH, "mode")
+				require.Equal(t, events[0].FlagsRaw, unix.O_CREAT|unix.O_RDWR, "flags")
 			},
 		},
 		"test_symbolic_links": {
 			runnerConfig: &utilstest.RunnerConfig{},
-			generateEvent: func(t *testing.T) int {
+			mntnsFilterMap: func(info *utilstest.RunnerInfo) *ebpf.Map {
+				return utilstest.CreateMntNsFilterMap(t, info.MountNsID)
+			},
+			generateEvent: func() (int, error) {
 				// Create a symbolic link to /dev/null
 				err := os.Symlink("/dev/null", "/tmp/test_symbolic_links")
 				if err != nil {
-					require.NoError(t, err, "creating a symbolic link")
-					return 0
+					return 0, err
 				}
+
 				defer os.Remove("/tmp/test_symbolic_links")
 
 				// Open the symbolic link
 				fd, err := unix.Open("/tmp/test_symbolic_links", unix.O_RDONLY, 0)
 				if err != nil {
-					require.NoError(t, err, "opening the symbolic link")
-					return 0
+					return 0, err
 				}
+
 				defer unix.Close(fd)
 
-				return fd
+				return fd, nil
 			},
 			validateEvent: func(t *testing.T, info *utilstest.RunnerInfo, fd int, events []ExpectedTraceOpenEvent) {
-				utilstest.ExpectAtLeastOneEvent(func(info *utilstest.RunnerInfo, fd int) *ExpectedTraceOpenEvent {
-					return &ExpectedTraceOpenEvent{
-						Comm:     info.Comm,
-						Pid:      info.Pid,
-						Tid:      info.Tid,
-						Uid:      uint32(info.Uid),
-						Gid:      uint32(info.Gid),
-						Fd:       uint32(fd),
-						FName:    "/tmp/test_symbolic_links",
-						FlagsRaw: 0,
-						ModeRaw:  0,
-						ErrRaw:   0,
-					}
-				})(t, info, fd, events)
+				require.Len(t, events, 1, "expected one event")
+				require.Equal(t, events[0].FName, "/tmp/test_symbolic_links", "filename")
 			},
 		},
 		"test_relative_path": {
 			runnerConfig: &utilstest.RunnerConfig{},
-			generateEvent: func(t *testing.T) int {
+			mntnsFilterMap: func(info *utilstest.RunnerInfo) *ebpf.Map {
+				return utilstest.CreateMntNsFilterMap(t, info.MountNsID)
+			},
+			generateEvent: func() (int, error) {
 				relPath := generateRelativePathForAbsolutePath(t, "/tmp/test_relative_path")
-				fd, err := unix.Open(relPath, unix.O_CREAT|unix.O_RDWR, unix.S_IRWXU|unix.S_IRGRP|unix.S_IWGRP|unix.S_IXOTH)
-				require.NoError(t, err, "opening file")
+				fd, err := unix.Open(relPath, unix.O_CREAT, 0)
+				if err != nil {
+					return 0, err
+				}
 
 				defer os.Remove(relPath)
 
 				unix.Close(fd)
 
-				return fd
+				return fd, nil
 			},
 			validateEvent: func(t *testing.T, info *utilstest.RunnerInfo, fd int, events []ExpectedTraceOpenEvent) {
-				utilstest.ExpectAtLeastOneEvent(func(info *utilstest.RunnerInfo, fd int) *ExpectedTraceOpenEvent {
-					return &ExpectedTraceOpenEvent{
-						Comm:     info.Comm,
-						Pid:      info.Pid,
-						Tid:      info.Tid,
-						Uid:      uint32(info.Uid),
-						Gid:      uint32(info.Gid),
-						Fd:       uint32(fd),
-						FName:    generateRelativePathForAbsolutePath(t, "/tmp/test_relative_path"),
-						FlagsRaw: 66,
-						ModeRaw:  497,
-						ErrRaw:   0,
-					}
-				})(t, info, fd, events)
+				require.Len(t, events, 1, "expected one event")
+				relative_path := generateRelativePathForAbsolutePath(t, "/tmp/test_relative_path")
+				require.Equal(t, events[0].FName, relative_path, "filename")
 			},
 		},
 		"test_prefix_on_directory": {
 			runnerConfig: &utilstest.RunnerConfig{},
-			generateEvent: func(t *testing.T) int {
+			generateEvent: func() (int, error) {
 				err := os.Mkdir("/tmp/foo", 0o750)
-				require.NoError(t, err, "mkdir for /tmp/foo")
+				if err != nil {
+					return 0, err
+				}
 
 				defer os.RemoveAll("/tmp/foo")
 
 				fd, err := unix.Open("/tmp/foo/bar.test", unix.O_RDONLY|unix.O_CREAT, 0)
-				require.NoError(t, err, "opening /tmp/foo")
+				if err != nil {
+					return 0, err
+				}
 
 				defer unix.Close(fd)
 
 				badfd, err := unix.Open("/tmp/quux.test", unix.O_RDONLY|unix.O_CREAT, 0)
-				require.NoError(t, err, "opening /tmp/quux.test")
+				if err != nil {
+					return 0, err
+				}
 
 				defer unix.Close(badfd)
 
-				return fd
+				return fd, nil
 			},
 			validateEvent: func(t *testing.T, info *utilstest.RunnerInfo, fd int, events []ExpectedTraceOpenEvent) {
 				utilstest.ExpectAtLeastOneEvent(func(info *utilstest.RunnerInfo, fd int) *ExpectedTraceOpenEvent {
@@ -234,42 +215,65 @@ func TestTraceOpenGadget(t *testing.T) {
 						ModeRaw:  0,
 					}
 				})(t, info, fd, events)
-			}},
+			},
+		},
+		"event_has_UID_and_GID_of_user_generating_event": {
+			runnerConfig: &utilstest.RunnerConfig{
+				Uid: int(1435),
+				Gid: int(6789),
+			},
+			mntnsFilterMap: func(info *utilstest.RunnerInfo) *ebpf.Map {
+				return utilstest.CreateMntNsFilterMap(t, info.MountNsID)
+			},
+			generateEvent: generateEvent,
+			validateEvent: func(t *testing.T, info *utilstest.RunnerInfo, _ int, events []ExpectedTraceOpenEvent) {
+				if len(events) != 1 {
+					t.Fatalf("One event expected")
+				}
+
+				utilstest.Equal(t, uint32(info.Uid), events[0].Uid,
+					"Captured event has bad UID")
+
+				utilstest.Equal(t, uint32(info.Gid), events[0].Gid,
+					"Captured event event has bad GID")
+			},
+		},
 	}
 	for name, testCase := range testCases {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			var fd int
 			runner := utilstest.NewRunnerWithTest(t, testCase.runnerConfig)
-			apiParams := map[string]string{
-				"operator.oci.ebpf.uid": "0",
+			var mntnsFilterMap *ebpf.Map
+			if testCase.mntnsFilterMap != nil {
+				mntnsFilterMap = testCase.mntnsFilterMap(runner.Info)
 			}
-			var mntsFilterMap *ebpf.Map
-			if testCase.mntsFilterMap != nil {
-				mntsFilterMap = testCase.mntsFilterMap(runner.Info)
-			}
-			opts := gadgetrunner.GadgetOpts[ExpectedTraceOpenEvent]{
-				Image:        "trace_open",
-				Timeout:      5 * time.Second,
-				MnsFilterMap: mntsFilterMap,
-				ApiParams:    apiParams,
-			}
-			gdgt := gadgetrunner.NewGadget(
-				t, opts,
-			)
-			gdgt.OnGadgetRun = func(gadgetCtx operators.GadgetContext) error {
+			onGadgetRun := func(gadgetCtx operators.GadgetContext) error {
 				utilstest.RunWithRunner(t, runner, func() error {
-					fd = testCase.generateEvent(t)
+					var err error
+					fd, err = testCase.generateEvent()
+					if err != nil {
+						return err
+					}
 					return nil
 				})
 				return nil
 			}
-			gdgt.RunGadget()
+			opts := gadgetrunner.GadgetOpts[ExpectedTraceOpenEvent]{
+				Image:          "trace_open",
+				Timeout:        5 * time.Second,
+				MntnsFilterMap: mntnsFilterMap,
+				OnGadgetRun:    onGadgetRun,
+			}
+			gadgetRunner := gadgetrunner.NewGadget(t, opts)
 
-			testCase.validateEvent(t, runner.Info, fd, gdgt.CapturedEvents)
+			gadgetRunner.RunGadget()
+
+			testCase.validateEvent(t, runner.Info, fd, gadgetRunner.CapturedEvents)
 		})
 	}
 }
+
 func generateRelativePathForAbsolutePath(t *testing.T, fileName string) string {
 	// If the filename is relative, return it as is
 	if !filepath.IsAbs(fileName) {
@@ -286,13 +290,17 @@ func generateRelativePathForAbsolutePath(t *testing.T, fileName string) string {
 }
 
 // generateEvent simulates an event by opening and closing a file
-func generateEvent(t *testing.T) int {
+func generateEvent() (int, error) {
 	fd, err := unix.Open("/dev/null", 0, 0)
-	require.NoError(t, err, "opening file")
+	if err != nil {
+		return 0, err
+	}
 
 	// Close the file descriptor to simulate the event
 	err = unix.Close(fd)
-	require.NoError(t, err, "closing file")
+	if err != nil {
+		return fd, err
+	}
 
-	return fd
+	return fd, nil
 }

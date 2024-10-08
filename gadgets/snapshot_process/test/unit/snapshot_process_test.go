@@ -25,7 +25,6 @@ import (
 
 	utilstest "github.com/inspektor-gadget/inspektor-gadget/internal/test"
 	containerutils "github.com/inspektor-gadget/inspektor-gadget/pkg/container-utils"
-	_ "github.com/inspektor-gadget/inspektor-gadget/pkg/operators/ebpf"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/testing/gadgetrunner"
 )
 
@@ -41,7 +40,7 @@ type ExpectedSnapshotProcessEvent struct {
 
 type testDef struct {
 	runnerConfig   *utilstest.RunnerConfig
-	generateEvent  func(t *testing.T) int
+	generateEvent  func() (int, error)
 	validateEvent  func(t *testing.T, info *utilstest.RunnerInfo, sleepPid int, events []ExpectedSnapshotProcessEvent)
 	mntnsFilterMap func(info *utilstest.RunnerInfo) *ebpf.Map
 }
@@ -81,7 +80,6 @@ func TestSnapshotProcessGadget(t *testing.T) {
 		"captures_events_with_matching_filter": {
 			mntnsFilterMap: func(info *utilstest.RunnerInfo) *ebpf.Map {
 				return utilstest.CreateMntNsFilterMap(t, info.MountNsID)
-
 			},
 			generateEvent: generateEvent,
 			validateEvent: func(t *testing.T, info *utilstest.RunnerInfo, sleepPid int, events []ExpectedSnapshotProcessEvent) {
@@ -118,39 +116,42 @@ func TestSnapshotProcessGadget(t *testing.T) {
 			var processId int
 
 			runner := utilstest.NewRunnerWithTest(t, testCase.runnerConfig)
-			var filterMap *ebpf.Map
+			var mntnsFilterMap *ebpf.Map
 			if testCase.mntnsFilterMap != nil {
-				filterMap = testCase.mntnsFilterMap(runner.Info)
+				mntnsFilterMap = testCase.mntnsFilterMap(runner.Info)
 			}
-			Opts := gadgetrunner.GadgetOpts[ExpectedSnapshotProcessEvent]{
-				Image:        "snapshot_process",
-				Timeout:      5 * time.Second,
-				MnsFilterMap: filterMap,
-				ApiParams:    nil,
-			}
-			gdgt := gadgetrunner.NewGadget(t, Opts)
-
-			gdgt.BeforeGadgetRun = func() error {
+			beforeGadgetRun := func() error {
 				// Use the runner to generate an event
 				utilstest.RunWithRunner(t, runner, func() error {
-					pid := testCase.generateEvent(t)
+					pid, err := testCase.generateEvent()
+					if err != nil {
+						return err
+					}
 					processId = pid
 					return nil
 				})
 				return nil
 			}
+			opts := gadgetrunner.GadgetOpts[ExpectedSnapshotProcessEvent]{
+				Image:           "snapshot_process",
+				Timeout:         5 * time.Second,
+				MntnsFilterMap:  mntnsFilterMap,
+				BeforeGadgetRun: beforeGadgetRun,
+			}
+			gadgetRunner := gadgetrunner.NewGadget(t, opts)
 
-			gdgt.RunGadget()
+			gadgetRunner.RunGadget()
 
-			testCase.validateEvent(t, runner.Info, processId, gdgt.CapturedEvents)
+			testCase.validateEvent(t, runner.Info, processId, gadgetRunner.CapturedEvents)
 		})
 	}
 }
-func generateEvent(t *testing.T) int {
+
+func generateEvent() (int, error) {
 	cmd := exec.Command("/bin/sleep", "5")
 	if err := cmd.Start(); err != nil {
-		require.NoError(t, err, "starting command")
-		return 0
+		return 0, err
 	}
-	return cmd.Process.Pid
+
+	return cmd.Process.Pid, nil
 }
