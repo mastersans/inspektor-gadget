@@ -119,7 +119,7 @@ clean: $(addsuffix -clean,$(GADGETS))
 test-unit:
 	GADGET_REPOSITORY=$(GADGET_REPOSITORY) \
 	GADGET_TAG=$(GADGET_TAG) \
-	@find ./*/test/unit -type d -exec go test -test.v -exec sudo {} \; || true
+	find ./*/test/unit -type d -exec go test -test.v -exec sudo {} \; || true
 
 .PHONY:
 test-integration: build
@@ -128,7 +128,7 @@ test-integration: build
 	GADGET_REPOSITORY=$(GADGET_REPOSITORY) \
 	GADGET_TAG=$(GADGET_TAG) \
 	IG_FLAGS=$(IG_FLAGS) \
-	@find ./*/test/integration -type d -exec go test -test.v -exec sudo {} \; || true
+	find ./*/test/integration -type d -exec go test -test.v -exec sudo {} \; || true
 
 .PHONY:
 test-local: IG_PATH=$(IG)
