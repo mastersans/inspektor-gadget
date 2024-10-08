@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -38,11 +39,12 @@ import (
 	ocihandler "github.com/inspektor-gadget/inspektor-gadget/pkg/operators/oci-handler"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/operators/simple"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/operators/socketenricher"
+	_ "github.com/inspektor-gadget/inspektor-gadget/pkg/operators/wasm"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/params"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/runtime/local"
 )
 
-type GadgetOpts[T any] struct {
+type GadgetRunnerOpts[T any] struct {
 	Image          string
 	Timeout        time.Duration
 	MntnsFilterMap *ebpf.Map
@@ -57,9 +59,9 @@ type GadgetRunner[T any] struct {
 	image          string
 	timeout        time.Duration
 	mntnsFilterMap *ebpf.Map
-	apiParams      api.ParamValues
+	paramValues    api.ParamValues
 	runtimeParams  *params.Params
-	TestCtx        *testing.T
+	testCtx        *testing.T
 
 	gadgetCtx      *gadgetcontext.GadgetContext
 	gadgetOperator operators.DataOperator
@@ -73,8 +75,7 @@ type GadgetRunner[T any] struct {
 	normalizeEvent  func(event *T)
 }
 
-// NewGadget initializes a new GadgetRunner
-func NewGadget[T any](t *testing.T, opts GadgetOpts[T]) *GadgetRunner[T] {
+func NewGadgetRunner[T any](t *testing.T, opts GadgetRunnerOpts[T]) *GadgetRunner[T] {
 	if opts.Image == "" {
 		require.Fail(t, "invalid image name")
 		return nil
@@ -84,14 +85,25 @@ func NewGadget[T any](t *testing.T, opts GadgetOpts[T]) *GadgetRunner[T] {
 		return nil
 	}
 
+	verifyImage := strings.ToLower(os.Getenv("IG_VERIFY_IMAGE"))
+	if verifyImage == "true" || verifyImage == "false" {
+		if opts.ParamValues == nil {
+			opts.ParamValues = map[string]string{
+				"operator.oci.verify-image": verifyImage,
+			}
+		} else {
+			opts.ParamValues["operator.oci.verify-image"] = verifyImage
+		}
+	}
+
 	gadgetImage := GetGadgetImageName(opts.Image)
 	return &GadgetRunner[T]{
 		image:          gadgetImage,
 		timeout:        opts.Timeout,
-		apiParams:      opts.ParamValues,
+		paramValues:    opts.ParamValues,
 		CapturedEvents: make([]T, 0),
 		mntnsFilterMap: opts.MntnsFilterMap,
-		TestCtx:        t,
+		testCtx:        t,
 
 		onGadgetRun:     opts.OnGadgetRun,
 		beforeGadgetRun: opts.BeforeGadgetRun,
@@ -99,7 +111,6 @@ func NewGadget[T any](t *testing.T, opts GadgetOpts[T]) *GadgetRunner[T] {
 	}
 }
 
-// StartGadget starts the gadget
 func (g *GadgetRunner[T]) RunGadget() {
 	var mu sync.Mutex
 	if g.DataFunc == nil {
@@ -108,7 +119,7 @@ func (g *GadgetRunner[T]) RunGadget() {
 			event := new(T)
 			jsonOutput := g.JsonFormatter.Marshal(data)
 			err := json.Unmarshal(jsonOutput, event)
-			require.NoError(g.TestCtx, err, "unmarshalling event")
+			require.NoError(g.testCtx, err, "unmarshalling event")
 
 			if g.normalizeEvent != nil {
 				g.normalizeEvent(event)
@@ -126,7 +137,7 @@ func (g *GadgetRunner[T]) RunGadget() {
 				jsonFormatter, err := igjson.New(d,
 					igjson.WithShowAll(true),
 				)
-				require.NoError(g.TestCtx, err, "json formatter error")
+				require.NoError(g.testCtx, err, "json formatter error")
 				g.JsonFormatter = jsonFormatter
 				d.Subscribe(g.DataFunc, 50000)
 			}
@@ -166,15 +177,15 @@ func (g *GadgetRunner[T]) RunGadget() {
 	g.gadgetCtx = gadgetcontext.New(context.Background(), g.image, dataOperatorOps...)
 	runtime := local.New()
 	err := runtime.Init(nil)
-	require.NoError(g.TestCtx, err, "runtime initialization error")
+	require.NoError(g.testCtx, err, "runtime initialization error")
 
 	// Run the gadget
 	if g.beforeGadgetRun != nil {
 		err = g.beforeGadgetRun()
-		require.NoError(g.TestCtx, err, "before gadget run error")
+		require.NoError(g.testCtx, err, "before gadget run error")
 	}
-	err = runtime.RunGadget(g.gadgetCtx, g.runtimeParams, g.apiParams)
-	require.NoError(g.TestCtx, err, "running gadget error")
+	err = runtime.RunGadget(g.gadgetCtx, g.runtimeParams, g.paramValues)
+	require.NoError(g.testCtx, err, "running gadget error")
 }
 
 func GetGadgetImageName(gadget string) string {
@@ -195,7 +206,7 @@ func (g *GadgetRunner[T]) WithLocalManager() *localmanager.LocalManager {
 	localManagerParams.Get(localmanager.Runtimes).Set("docker")
 
 	err := localManagerOp.Init(localManagerParams)
-	require.NoError(g.TestCtx, err, "Initiatlizing Local Manager")
+	require.NoError(g.testCtx, err, "Initiatlizing Local Manager")
 	defer localManagerOp.Close()
 	return localManagerOp
 }
@@ -204,7 +215,7 @@ func (g *GadgetRunner[T]) WithSocketEnricher() *socketenricher.SocketEnricher {
 	socketEnricherOp := &socketenricher.SocketEnricher{}
 
 	err := socketEnricherOp.Init(nil)
-	require.NoError(g.TestCtx, err, "Initiatlizing SocketEnricher")
+	require.NoError(g.testCtx, err, "Initiatlizing SocketEnricher")
 	defer socketEnricherOp.Close()
 	return socketEnricherOp
 }

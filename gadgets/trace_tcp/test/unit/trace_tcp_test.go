@@ -91,11 +91,10 @@ func TestTraceTcpGadget(t *testing.T) {
 	for name, testCase := range testCases {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			params := map[string]string{
-				"operator.LocalManager.host": "true",
-			}
 			runner := utilstest.NewRunnerWithTest(t, testCase.runnerConfig)
 			normalizeEvent := func(event *ExpectedTraceTcpEvent) {
+				// Src port varies, so we normalize it
+				// TODO: Add a generateEvent function that allows us to test specific src port too.
 				utils.NormalizeInt(&event.Src.Port)
 			}
 
@@ -107,15 +106,14 @@ func TestTraceTcpGadget(t *testing.T) {
 				return nil
 			}
 
-			Opts := gadgetrunner.GadgetOpts[ExpectedTraceTcpEvent]{
+			Opts := gadgetrunner.GadgetRunnerOpts[ExpectedTraceTcpEvent]{
 				Image:          "trace_tcp",
 				Timeout:        5 * time.Second,
-				ParamValues:    params,
 				OnGadgetRun:    onGadgetRun,
 				NormalizeEvent: normalizeEvent,
 			}
 
-			gadgetRunner := gadgetrunner.NewGadget(t, Opts)
+			gadgetRunner := gadgetrunner.NewGadgetRunner(t, Opts)
 
 			gadgetRunner.RunGadget()
 

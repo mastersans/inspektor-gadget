@@ -69,9 +69,8 @@ func TestTopFileGadget(t *testing.T) {
 						T:    "R",
 						File: filepath,
 
-						// Only check the existence of pid as bash creates subshell
-						Pid: utils.NormalizedInt,
-						Tid: utils.NormalizedInt,
+						Pid: info.Pid,
+						Tid: info.Tid,
 
 						// Only check the existence.
 						Writes: utils.NormalizedInt,
@@ -98,7 +97,6 @@ func TestTopFileGadget(t *testing.T) {
 			runner := utilstest.NewRunnerWithTest(t, testCase.runnerConfig)
 			params := map[string]string{
 				"operator.oci.ebpf.map-fetch-interval": "1000ms",
-				"operator.LocalManager.host":           "true",
 			}
 
 			var mntnsFilterMap *ebpf.Map
@@ -106,8 +104,6 @@ func TestTopFileGadget(t *testing.T) {
 				mntnsFilterMap = testCase.mntnsFilterMap(runner.Info)
 			}
 			normalizeEvent := func(event *ExpectedTopFileEvent) {
-				utils.NormalizeInt(&event.Tid)
-				utils.NormalizeInt(&event.Pid)
 				utils.NormalizeInt(&event.Writes)
 			}
 			onGadgetRun := func(gadgetCtx operators.GadgetContext) error {
@@ -121,7 +117,7 @@ func TestTopFileGadget(t *testing.T) {
 				})
 				return nil
 			}
-			opts := gadgetrunner.GadgetOpts[ExpectedTopFileEvent]{
+			opts := gadgetrunner.GadgetRunnerOpts[ExpectedTopFileEvent]{
 				Image:          "top_file",
 				Timeout:        5 * time.Second,
 				MntnsFilterMap: mntnsFilterMap,
@@ -130,7 +126,7 @@ func TestTopFileGadget(t *testing.T) {
 				NormalizeEvent: normalizeEvent,
 			}
 
-			gadgetRunner := gadgetrunner.NewGadget(t, opts)
+			gadgetRunner := gadgetrunner.NewGadgetRunner(t, opts)
 
 			gadgetRunner.RunGadget()
 

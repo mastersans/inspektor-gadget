@@ -132,13 +132,13 @@ func TestSnapshotProcessGadget(t *testing.T) {
 				})
 				return nil
 			}
-			opts := gadgetrunner.GadgetOpts[ExpectedSnapshotProcessEvent]{
+			opts := gadgetrunner.GadgetRunnerOpts[ExpectedSnapshotProcessEvent]{
 				Image:           "snapshot_process",
 				Timeout:         5 * time.Second,
 				MntnsFilterMap:  mntnsFilterMap,
 				BeforeGadgetRun: beforeGadgetRun,
 			}
-			gadgetRunner := gadgetrunner.NewGadget(t, opts)
+			gadgetRunner := gadgetrunner.NewGadgetRunner(t, opts)
 
 			gadgetRunner.RunGadget()
 

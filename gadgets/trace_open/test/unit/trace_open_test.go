@@ -227,15 +227,9 @@ func TestTraceOpenGadget(t *testing.T) {
 			},
 			generateEvent: generateEvent,
 			validateEvent: func(t *testing.T, info *utilstest.RunnerInfo, _ int, events []ExpectedTraceOpenEvent) {
-				if len(events) != 1 {
-					t.Fatalf("One event expected")
-				}
-
-				utilstest.Equal(t, uint32(info.Uid), events[0].Uid,
-					"Captured event has bad UID")
-
-				utilstest.Equal(t, uint32(info.Gid), events[0].Gid,
-					"Captured event event has bad GID")
+				require.Len(t, events, 1, "expected one event")
+				require.Equal(t, uint32(info.Uid), events[0].Uid)
+				require.Equal(t, uint32(info.Gid), events[0].Gid)
 			},
 		},
 	}
@@ -259,13 +253,13 @@ func TestTraceOpenGadget(t *testing.T) {
 				})
 				return nil
 			}
-			opts := gadgetrunner.GadgetOpts[ExpectedTraceOpenEvent]{
+			opts := gadgetrunner.GadgetRunnerOpts[ExpectedTraceOpenEvent]{
 				Image:          "trace_open",
 				Timeout:        5 * time.Second,
 				MntnsFilterMap: mntnsFilterMap,
 				OnGadgetRun:    onGadgetRun,
 			}
-			gadgetRunner := gadgetrunner.NewGadget(t, opts)
+			gadgetRunner := gadgetrunner.NewGadgetRunner(t, opts)
 
 			gadgetRunner.RunGadget()
 
