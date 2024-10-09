@@ -119,7 +119,7 @@ sign-existing: $(addsuffix -sign-existing,$(GADGETS))
 clean: $(addsuffix -clean,$(GADGETS))
 
 .PHONY: 
-test-unit:
+test-unit: build
 	IG_VERIFY_IMAGE=$(IG_VERIFY_IMAGE) \
 	GADGET_TAG=$(GADGET_TAG) \
 	GADGET_REPOSITORY=$(GADGET_REPOSITORY) \
@@ -127,14 +127,14 @@ test-unit:
 
 
 .PHONY: 
-%/test-unit:
+%/test-unit: build
 	IG_VERIFY_IMAGE=$(IG_VERIFY_IMAGE) \
 	GADGET_TAG=$(GADGET_TAG) \
 	GADGET_REPOSITORY=$(GADGET_REPOSITORY) \
 	go test -v -exec 'sudo -E' ./$*/$(UNIT_TEST_DIR)/...
 
 .PHONY: 
-%/test-integration:
+%/test-integration:	build
 	IG_PATH=$(IG_PATH) \
 	CGO_ENABLED=0 \
 	GADGET_REPOSITORY=$(GADGET_REPOSITORY) \
@@ -143,7 +143,7 @@ test-unit:
 	go test -v -exec 'sudo -E' ./$*/$(INTEGRATION_TEST_DIR)/...
 
 .PHONY: 
-test-integration: 
+test-integration: build
 	IG_PATH=$(IG_PATH) \
 	CGO_ENABLED=0 \
 	GADGET_REPOSITORY=$(GADGET_REPOSITORY) \
