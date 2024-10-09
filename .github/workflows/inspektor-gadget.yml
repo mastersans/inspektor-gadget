@@ -1456,7 +1456,7 @@ jobs:
             make \
             GADGET_REPOSITORY=${{ steps.set-repo-determine-image-tag.outputs.gadget-repository }} \
             GADGET_TAG=${{ steps.set-repo-determine-image-tag.outputs.gadget-tag }} \
-            IG_VERIFY_IMAGE=${{ needs.check-secrets.outputs.cosign }}" \
+            IG_VERIFY_IMAGE=${{ needs.check-secrets.outputs.cosign }} \
             -C gadgets/ test-unit -o build |& tee gadgets-tests.log & wait $!
       - name: Prepare and publish test reports
         if: always()
