@@ -1036,6 +1036,10 @@ jobs:
   gadgets-unit-tests:
     name: Gadget unit tests on kernel
     # level: 0
+    needs: 
+      - build-and-push-gadgets
+      - build-helper-images
+      - check-secrets
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -1057,6 +1061,19 @@ jobs:
         go-version: ${{ env.GO_VERSION }}
         cache: true
       id: go
+    - uses: actions/checkout@eef61447b9ff4aafe5dcd4e0bbf5d482be7e7871 # v4.2.1
+    - name: Set container repository and determine image tag
+      id: set-repo-determine-image-tag
+      uses: ./.github/actions/set-container-repo-and-determine-image-tag
+      with:
+        registry: ${{ env.REGISTRY }}
+        container-image: ${{ env.CONTAINER_REPO }}
+    - name: Setup go
+      uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: true
+      id: go
     - name: Set up QEMU
       run: |
         sudo apt-get update
@@ -1068,8 +1085,18 @@ jobs:
     - name: Run gadget unit tests
       run: |
         set -o pipefail
-        go test -exec vimto ./pkg/gadgets/... -vm.kernel ghcr.io/mauriciovasquezbernal/ci-kernels:${{ matrix.kernel }} -vm.sudo -vm.memory=4096M
-
+        GADGET_REPOSITORY=${{ steps.set-repo-determine-image-tag.outputs.gadget-repository }} \
+        GADGET_TAG=${{ steps.set-repo-determine-image-tag.outputs.gadget-tag }} \
+        IG_VERIFY_IMAGE=${{ needs.check-secrets.outputs.cosign }} \
+        go test -exec vimto .gadgets/.../test/unit/... -vm.kernel ghcr.io/mauriciovasquezbernal/ci-kernels:${{ matrix.kernel }} -vm.sudo -vm.memory=4096M
+    - name: Prepare and publish test reports
+      if: always()
+      continue-on-error: true
+      uses: ./.github/actions/prepare-and-publish-test-reports
+      with:
+        test-log-file: gadgets-tests.log
+        test-step-conclusion: ${{ steps.gadgets-tests.conclusion }}
+        test-summary-suffix: "gadgets-unittest-${{ matrix.kernel }}"
   benchmarks:
     name: Benchmarks
     # level: 0
