@@ -1,4 +1,4 @@
-// Copyright 2023 The Inspektor Gadget authors
+// Copyright 2023-2024 The Inspektor Gadget authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -158,7 +158,7 @@ func handleMetric(
 		return nil, nil, fmt.Errorf("initializing operators: %w", err)
 	}
 
-	gadgetCtx := gadgetcontext.New(
+	gadgetCtx := gadgetcontext.NewBuiltIn(
 		ctx,
 		metricCommon.Name,
 		runtime,
@@ -170,7 +170,6 @@ func handleMetric(
 		parser,
 		logger.DefaultLogger(),
 		0,
-		nil,
 	)
 
 	// Handle remaining filtering logic in the parser
@@ -280,7 +279,7 @@ func createCounter(
 	parser.SetEventCallback(cb)
 
 	go func() {
-		if _, err = runtime.RunGadget(gadgetCtx); err != nil {
+		if _, err = runtime.RunBuiltInGadget(gadgetCtx); err != nil {
 			gadgetCtx.Logger().Errorf("running gadget: %s", err)
 		}
 	}()
@@ -352,7 +351,7 @@ func createGauge(
 	callback := func(ctx context.Context, obs otelmetric.Observer) error {
 		// This is a one-shot gadget, hence we can run it here and wait for it to finish
 		// without having to create a new goroutine.
-		if _, err = runtime.RunGadget(gadgetCtx); err != nil {
+		if _, err = runtime.RunBuiltInGadget(gadgetCtx); err != nil {
 			return fmt.Errorf("running gadget: %w", err)
 		}
 
@@ -462,7 +461,7 @@ func createHistogram(
 	parser.SetEventCallback(cb)
 
 	go func() {
-		if _, err = runtime.RunGadget(gadgetCtx); err != nil {
+		if _, err = runtime.RunBuiltInGadget(gadgetCtx); err != nil {
 			gadgetCtx.Logger().Errorf("running gadget: %s", err)
 		}
 	}()

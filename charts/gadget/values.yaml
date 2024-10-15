@@ -15,6 +15,8 @@ config:
   crioSocketPath: "/run/crio/crio.sock"
   # -- Docker Engine API Unix socket path
   dockerSocketPath: "/run/docker.sock"
+  # -- Podman API Unix socket path
+  podmanSocketPath: "/run/podman/podman.sock"
 
   # -- Enable experimental features
   experimental: false
@@ -24,6 +26,23 @@ config:
 
   # -- Daemon Log Level. Valid values are: "trace", "debug", "info", "warning", "error", "fatal", "panic"
   daemonLogLevel: "info"
+
+  # -- Verify image-based gadgets
+  verifyGadgets: true
+
+  # -- Public keys used to verify image-based gadgets
+  gadgetsPublicKeys:
+    - |
+      -----BEGIN PUBLIC KEY-----
+      MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEoDOC0gYSxZTopenGmX3ZFvQ1DSfh
+      Ir4EKRt5jC+mXaJ7c7J+oREskYMn/SfZdRHNSOjLTZUMDm60zpXGhkFecg==
+      -----END PUBLIC KEY-----
+
+  # -- List of allowed gadgets.
+  allowedGadgets: []
+
+  # -- Disallow pulling gadgets.
+  disallowGadgetsPulling: false
 
   # -- Mount pull secret (gadget-pull-secret) to pull image-based gadgets from private registry
   mountPullSecret: false

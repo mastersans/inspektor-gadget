@@ -8,6 +8,8 @@ MINIKUBE ?= minikube
 KUBERNETES_DISTRIBUTION ?= ""
 GADGET_TAG ?= $(shell ./tools/image-tag branch)
 GADGET_REPOSITORY ?= ghcr.io/inspektor-gadget/gadget
+VERIFY_GADGETS ?= true
+TEST_COMPONENT ?= inspektor-gadget
 
 GOHOSTOS ?= $(shell go env GOHOSTOS)
 GOHOSTARCH ?= $(shell go env GOHOSTARCH)
@@ -23,7 +25,7 @@ BPFTOOL ?= bpftool
 ARCH ?= $(shell uname -m | sed 's/x86_64/x86/' | sed 's/aarch64/arm64/' | sed 's/ppc64le/powerpc/' | sed 's/mips.*/mips/')
 
 # This version number must be kept in sync with CI workflow lint one.
-LINTER_VERSION ?= v1.54.2
+LINTER_IMAGE ?= golangci/golangci-lint:v1.59.0@sha256:8ad7dc3d98d77dec753f07408c7683ab854752a3eb8dc6a5e5f0728f9a89ae2c
 
 EBPF_BUILDER ?= ghcr.io/inspektor-gadget/ebpf-builder:latest
 
@@ -55,7 +57,7 @@ include crd.mk
 include tests.mk
 include minikube.mk
 
-LDFLAGS := "-X github.com/inspektor-gadget/inspektor-gadget/cmd/common.version=$(VERSION) \
+LDFLAGS := "-X github.com/inspektor-gadget/inspektor-gadget/internal/version.version=$(VERSION) \
 -X main.gadgetimage=$(CONTAINER_REPO):$(IMAGE_TAG) \
 -extldflags '-static'"
 
@@ -114,7 +116,7 @@ ig: ig-$(GOHOSTOS)-$(GOHOSTARCH)
 # See: https://pkg.go.dev/cmd/compile
 debug-ig:
 	CGO_ENABLED=0 go build \
-		-ldflags "-X github.com/inspektor-gadget/inspektor-gadget/cmd/common.version=${VERSION} \
+		-ldflags "-X github.com/inspektor-gadget/inspektor-gadget/internal/version.version=${VERSION} \
 		-X github.com/inspektor-gadget/inspektor-gadget/cmd/common/image.builderImage=${EBPF_BUILDER} \
 		-extldflags '-static'" \
 		-gcflags='all=-N -l' \
@@ -209,7 +211,7 @@ gadget-container:
 			BTFHUB_ARCHIVE=$(HOME)/btfhub-archive/ -j$(nproc); \
 	fi
 	docker buildx build --load -t $(CONTAINER_REPO):$(IMAGE_TAG) \
-		--build-arg GOPROXY=$(GOPROXY) \
+		--build-arg GOPROXY=$(GOPROXY) --build-arg VERSION=$(VERSION) \
 		-f Dockerfiles/gadget.Dockerfile .
 
 .PHONY: cross-gadget-container
@@ -222,7 +224,7 @@ cross-gadget-container:
 			ARCH=arm64 BTFHUB_ARCHIVE=$(HOME)/btfhub-archive/ -j$(nproc); \
 	fi
 	docker buildx build --platform=$(PLATFORMS) -t $(CONTAINER_REPO):$(IMAGE_TAG) \
-		--push --build-arg GOPROXY=$(GOPROXY) \
+		--push --build-arg GOPROXY=$(GOPROXY) --build-arg VERSION=$(VERSION) \
 		-f Dockerfiles/gadget.Dockerfile .
 
 push-gadget-container:
@@ -271,22 +273,21 @@ ig-tests:
 	rm -f ./ig-manager.test
 
 # INTEGRATION_TESTS_PARAMS can be used to pass additional parameters locally e.g
-# INTEGRATION_TESTS_PARAMS="-run TestTraceExec -no-deploy-ig -no-deploy-spo" make integration-tests
+# INTEGRATION_TESTS_PARAMS="-run TestTraceExec -no-deploy-spo" make integration-tests
 .PHONY: integration-tests
 integration-tests: kubectl-gadget
 	KUBECTL_GADGET="$(shell pwd)/kubectl-gadget" \
-		go test ./integration/inspektor-gadget/... \
+		go test ./integration/k8s/... \
 			-v \
 			-integration \
 			-timeout 30m \
 			-k8s-distro $(KUBERNETES_DISTRIBUTION) \
 			-k8s-arch $(KUBERNETES_ARCHITECTURE) \
-			-image $(CONTAINER_REPO):$(IMAGE_TAG) \
 			-dnstester-image $(DNSTESTER_IMAGE) \
 			-gadget-repository $(GADGET_REPOSITORY) \
 			-gadget-tag $(GADGET_TAG) \
+			-test-component $(TEST_COMPONENT) \
 			$$INTEGRATION_TESTS_PARAMS
-
 
 .PHONY: component-tests
 component-tests:
@@ -307,7 +308,7 @@ website-local-update:
 	cp -r docs ../website/external-docs/inspektor-gadget.git_mainlatest/
 
 lint:
-	docker build -t linter -f Dockerfiles/linter.Dockerfile --build-arg VERSION=$(LINTER_VERSION) Dockerfiles
+	docker build -t linter -f Dockerfiles/linter.Dockerfile --build-arg IMAGE=$(LINTER_IMAGE) Dockerfiles
 # XDG_CACHE_HOME is necessary to avoid this type of errors:
 # ERRO Running error: context loading failed: failed to load packages: failed to load with go/packages: err: exit status 1: stderr: failed to initialize build cache at /.cache/go-build: mkdir /.cache: permission denied
 # Process 15167 has exited with status 3
@@ -344,7 +345,7 @@ minikube-deploy: minikube-start gadget-container kubectl-gadget
 	$(MINIKUBE) image ls --format=table | grep "$(CONTAINER_REPO)\s*|\s*$(IMAGE_TAG)" || \
 		(echo "Image $(CONTAINER_REPO)\s*|\s*$(IMAGE_TAG) was not correctly loaded into Minikube" && false)
 	@echo
-	./kubectl-gadget deploy --liveness-probe=$(LIVENESS_PROBE) \
+	./kubectl-gadget deploy --verify-gadgets=$(VERIFY_GADGETS) --liveness-probe=$(LIVENESS_PROBE) \
 		--image-pull-policy=Never
 	kubectl rollout status daemonset -n gadget gadget --timeout 30s
 	@echo "Image used by the gadget pod:"
@@ -380,6 +381,10 @@ build-gadgets: install/ig
 push-gadgets: install/ig
 	$(MAKE) -C gadgets/ push
 
+.PHONY: test-gadgets
+test-gadgets: install/ig
+	$(MAKE) -C gadgets/ test
+
 .PHONY: testdata
 testdata:
 	$(MAKE) -C testdata/
@@ -411,7 +416,8 @@ help:
 	@echo  '  controller-tests		- Run controllers unit tests'
 	@echo  '  ig-tests			- Run ig manager unit tests'
 	@echo  '  gadgets-unit-tests		- Run gadget unit tests'
-	@echo  '  integration-tests		- Run integration tests'
+	@echo  '  integration-tests		- Run integration tests (deploy IG before running the tests)'
+	@echo  '  test-gadgets			- Run gadgets test'
 	@echo  ''
 	@echo  'Installing targets:'
 	@echo  '  install/kubectl-gadget	- Build kubectl plugin and install it in ~/.local/bin'

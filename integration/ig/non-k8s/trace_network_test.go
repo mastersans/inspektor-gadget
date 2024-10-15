@@ -1,4 +1,4 @@
-// Copyright 2022-2023 The Inspektor Gadget authors
+// Copyright 2022-2024 The Inspektor Gadget authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,6 +20,8 @@ import (
 
 	. "github.com/inspektor-gadget/inspektor-gadget/integration"
 	networkTypes "github.com/inspektor-gadget/inspektor-gadget/pkg/gadgets/trace/network/types"
+	"github.com/inspektor-gadget/inspektor-gadget/pkg/testing/containers"
+	"github.com/inspektor-gadget/inspektor-gadget/pkg/testing/match"
 	eventtypes "github.com/inspektor-gadget/inspektor-gadget/pkg/types"
 )
 
@@ -87,19 +89,20 @@ func TestTraceNetwork(t *testing.T) {
 				e.Gid = 0
 
 				e.Runtime.ContainerID = ""
+				e.Runtime.ContainerStartedAt = 0
 				// TODO: Handle once we support getting ContainerImageName from Docker
 				e.Runtime.ContainerImageName = ""
 				e.Runtime.ContainerImageDigest = ""
 			}
 
-			ExpectEntriesToMatch(t, output, normalize, expectedEntries...)
+			match.MatchEntries(t, match.JSONMultiObjectMode, output, normalize, expectedEntries...)
 		},
 	}
 
 	testSteps := []TestStep{
 		traceNetworkCmd,
 		SleepForSecondsCommand(2), // wait to ensure ig has started
-		containerFactory.NewContainer(cn, "nginx && curl 127.0.0.1", WithContainerImage("docker.io/library/nginx")),
+		containerFactory.NewContainer(cn, "nginx && curl 127.0.0.1", containers.WithContainerImage("docker.io/library/nginx")),
 	}
 
 	RunTestSteps(testSteps, t)

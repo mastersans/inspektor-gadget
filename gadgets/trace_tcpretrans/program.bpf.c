@@ -31,23 +31,36 @@ enum type {
 	LOSS,
 };
 
+enum tcp_flags_set : __u8 {
+	FIN = 0x01,
+	SYN = 0x02,
+	RST = 0x04,
+	PSH = 0x08,
+	ACK = 0x10,
+	URG = 0x20,
+	ECE = 0x40,
+	CWR = 0x80,
+};
+
 struct event {
+	gadget_timestamp timestamp_raw;
+	gadget_netns_id netns_id;
+	gadget_mntns_id mntns_id;
+
 	struct gadget_l4endpoint_t src;
 	struct gadget_l4endpoint_t dst;
 
-	gadget_timestamp timestamp;
-	__u8 state;
-	__u8 tcpflags;
-	__u32 reason;
-	__u32 netns;
-	enum type type;
-
-	gadget_mntns_id mntns_id;
+	char comm[TASK_COMM_LEN];
+	// user-space terminology for pid and tid
 	__u32 pid;
 	__u32 tid;
 	__u32 uid;
 	__u32 gid;
-	__u8 task[TASK_COMM_LEN];
+
+	__u8 state;
+	enum tcp_flags_set tcpflags_raw;
+	__u32 reason;
+	enum type type_raw;
 };
 
 /* Define here, because there are conflicts with include files */
@@ -81,39 +94,39 @@ static __always_inline int __trace_tcp_retrans(void *ctx, const struct sock *sk,
 
 	sockp = (struct inet_sock *)sk;
 
-	event->type = type;
-	event->timestamp = bpf_ktime_get_boot_ns();
+	event->type_raw = type;
+	event->timestamp_raw = bpf_ktime_get_boot_ns();
 
 	family = BPF_CORE_READ(sk, __sk_common.skc_family);
 	switch (family) {
 	case AF_INET:
-		event->src.l3.version = event->dst.l3.version = 4;
+		event->src.version = event->dst.version = 4;
 
-		BPF_CORE_READ_INTO(&event->src.l3.addr.v4, sk,
+		BPF_CORE_READ_INTO(&event->src.addr_raw.v4, sk,
 				   __sk_common.skc_rcv_saddr);
-		if (event->src.l3.addr.v4 == 0)
+		if (event->src.addr_raw.v4 == 0)
 			goto cleanup;
 
-		BPF_CORE_READ_INTO(&event->dst.l3.addr.v4, sk,
+		BPF_CORE_READ_INTO(&event->dst.addr_raw.v4, sk,
 				   __sk_common.skc_daddr);
-		if (event->dst.l3.addr.v4 == 0)
+		if (event->dst.addr_raw.v4 == 0)
 			goto cleanup;
 		break;
 
 	case AF_INET6:
-		event->src.l3.version = event->dst.l3.version = 6;
+		event->src.version = event->dst.version = 6;
 
 		BPF_CORE_READ_INTO(
-			&event->src.l3.addr.v6, sk,
+			&event->src.addr_raw.v6, sk,
 			__sk_common.skc_v6_rcv_saddr.in6_u.u6_addr32);
-		if (((u64 *)event->src.l3.addr.v6)[0] == 0 &&
-		    ((u64 *)event->src.l3.addr.v6)[1] == 0)
+		if (((u64 *)event->src.addr_raw.v6)[0] == 0 &&
+		    ((u64 *)event->src.addr_raw.v6)[1] == 0)
 			goto cleanup;
 
-		BPF_CORE_READ_INTO(&event->dst.l3.addr.v6, sk,
+		BPF_CORE_READ_INTO(&event->dst.addr_raw.v6, sk,
 				   __sk_common.skc_v6_daddr.in6_u.u6_addr32);
-		if (((u64 *)event->dst.l3.addr.v6)[0] == 0 &&
-		    ((u64 *)event->dst.l3.addr.v6)[1] == 0)
+		if (((u64 *)event->dst.addr_raw.v6)[0] == 0 &&
+		    ((u64 *)event->dst.addr_raw.v6)[1] == 0)
 			goto cleanup;
 		break;
 
@@ -131,7 +144,8 @@ static __always_inline int __trace_tcp_retrans(void *ctx, const struct sock *sk,
 	// Instead, we have to read the TCP flags from the TCP control buffer.
 	if (skb) {
 		tcb = (struct tcp_skb_cb *)&(skb->cb[0]);
-		bpf_probe_read_kernel(&event->tcpflags, sizeof(event->tcpflags),
+		bpf_probe_read_kernel(&event->tcpflags_raw,
+				      sizeof(event->tcpflags_raw),
 				      &tcb->tcp_flags);
 	}
 
@@ -147,9 +161,11 @@ static __always_inline int __trace_tcp_retrans(void *ctx, const struct sock *sk,
 	if (event->src.port == 0)
 		goto cleanup;
 
-	BPF_CORE_READ_INTO(&event->netns, sk, __sk_common.skc_net.net, ns.inum);
+	BPF_CORE_READ_INTO(&event->netns_id, sk, __sk_common.skc_net.net,
+			   ns.inum);
 
-	struct sockets_value *skb_val = gadget_socket_lookup(sk, event->netns);
+	struct sockets_value *skb_val =
+		gadget_socket_lookup(sk, event->netns_id);
 
 	if (skb_val != NULL) {
 		event->mntns_id = skb_val->mntns;
@@ -159,8 +175,8 @@ static __always_inline int __trace_tcp_retrans(void *ctx, const struct sock *sk,
 
 		event->pid = skb_val->pid_tgid >> 32;
 		event->tid = (__u32)skb_val->pid_tgid;
-		__builtin_memcpy(&event->task, skb_val->task,
-				 sizeof(event->task));
+		__builtin_memcpy(&event->comm, skb_val->task,
+				 sizeof(event->comm));
 		event->uid = (__u32)skb_val->uid_gid;
 		event->gid = (__u32)(skb_val->uid_gid >> 32);
 	}

@@ -15,72 +15,49 @@
 package main
 
 import (
-	"context"
 	"fmt"
-	"strings"
 
-	"github.com/blang/semver"
 	"github.com/spf13/cobra"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/inspektor-gadget/inspektor-gadget/cmd/common"
-	commonutils "github.com/inspektor-gadget/inspektor-gadget/cmd/common/utils"
 	"github.com/inspektor-gadget/inspektor-gadget/cmd/kubectl-gadget/utils"
-	"github.com/inspektor-gadget/inspektor-gadget/pkg/k8sutil"
+	"github.com/inspektor-gadget/inspektor-gadget/internal/version"
 	grpcruntime "github.com/inspektor-gadget/inspektor-gadget/pkg/runtime/grpc"
 )
 
 func init() {
 	rootCmd.AddCommand(versionCmd)
-
-	utils.KubectlGadgetVersion, _ = semver.New(common.Version()[1:])
 }
 
 var versionCmd = &cobra.Command{
-	Use:   "version",
-	Short: "Show version",
+	Use:          "version",
+	Short:        "Show version",
+	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Println("Client version:", common.Version())
+		fmt.Printf("Client version: v%s\n", version.Version())
 
-		client, err := k8sutil.NewClientsetFromConfigFlags(utils.KubernetesConfigFlags)
+		gadgetNamespaces, err := utils.GetRunningGadgetNamespaces()
 		if err != nil {
-			return commonutils.WrapInErrSetupK8sClient(err)
+			return fmt.Errorf("searching for running Inspektor Gadget instances: %w", err)
 		}
 
-		gadgetNamespace := runtimeGlobalParams.Get(grpcruntime.ParamGadgetNamespace).AsString()
-
-		opts := metav1.ListOptions{LabelSelector: "k8s-app=gadget"}
-		pods, err := client.CoreV1().Pods(gadgetNamespace).List(context.TODO(), opts)
-		if err != nil {
-			return commonutils.WrapInErrListPods(err)
-		}
-
-		serverVersions := make(map[string]struct{})
-		for _, pod := range pods.Items {
-			image := pod.Spec.Containers[0].Image
-
-			// Get the image tag
-			parts := strings.Split(image, ":")
-			if len(parts) < 2 {
-				continue
-			}
-
-			versionStr := parts[len(parts)-1]
-			if _, ok := serverVersions[versionStr]; !ok {
-				serverVersions[versionStr] = struct{}{}
-			}
-		}
-
-		if len(serverVersions) == 0 {
+		switch len(gadgetNamespaces) {
+		case 0:
 			fmt.Println("Server version:", "not installed")
-		} else {
-			if len(serverVersions) > 1 {
-				fmt.Println("Warning: Multiple deployed versions detected")
-			}
-			for version := range serverVersions {
-				fmt.Println("Server version:", version)
-			}
+			return nil
+		case 1:
+			// Exactly one running gadget instance found, use it
+			runtimeGlobalParams.Set(grpcruntime.ParamGadgetNamespace, gadgetNamespaces[0])
+		default:
+			// Multiple running gadget instances found, error out
+			return fmt.Errorf("multiple running Inspektor Gadget instances found in following namespaces: %v", gadgetNamespaces)
 		}
+
+		info, err := grpcRuntime.InitDeployInfo()
+		if err != nil {
+			return fmt.Errorf("loading deploy info: %w", err)
+		}
+
+		fmt.Printf("Server version: v%s\n", info.ServerVersion)
 
 		return nil
 	},

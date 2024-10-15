@@ -1,4 +1,4 @@
-// Copyright 2022 The Inspektor Gadget authors
+// Copyright 2022-2024 The Inspektor Gadget authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -28,15 +28,20 @@ const (
 type Option func(*containerOptions)
 
 type containerOptions struct {
-	ctx            context.Context
-	image          string
-	imageTag       string
-	seccompProfile string
-	namespace      string
-	wait           bool
-	logs           bool
-	removal        bool
-	portBindings   nat.PortMap
+	ctx              context.Context
+	expectStartError bool
+	image            string
+	imageTag         string
+	mounts           []string
+	seccompProfile   string
+	namespace        string
+	wait             bool
+	waitOrOomKilled  bool
+	logs             bool
+	removal          bool
+	portBindings     nat.PortMap
+	privileged       bool
+	limits           map[string]string
 
 	// forceDelete is mostly used for debugging purposes, when a container
 	// fails to be deleted and we want to force it.
@@ -60,9 +65,21 @@ func WithContext(ctx context.Context) Option {
 	}
 }
 
+func WithExpectStartError() Option {
+	return func(opts *containerOptions) {
+		opts.expectStartError = true
+	}
+}
+
 func WithImage(image string) Option {
 	return func(opts *containerOptions) {
 		opts.image = image
+	}
+}
+
+func WithBindMounts(mounts []string) Option {
+	return func(opts *containerOptions) {
+		opts.mounts = mounts
 	}
 }
 
@@ -91,9 +108,21 @@ func WithoutWait() Option {
 	}
 }
 
+func WithWaitOrOomKilled() Option {
+	return func(opts *containerOptions) {
+		opts.waitOrOomKilled = true
+	}
+}
+
 func WithoutLogs() Option {
 	return func(opts *containerOptions) {
 		opts.logs = false
+	}
+}
+
+func WithPrivileged() Option {
+	return func(opts *containerOptions) {
+		opts.privileged = true
 	}
 }
 
@@ -118,5 +147,12 @@ func WithPortBindings(portBindings nat.PortMap) Option {
 func WithForceDelete() Option {
 	return func(opts *containerOptions) {
 		opts.forceDelete = true
+	}
+}
+
+// WithLimits sets the resource limits of the container
+func WithLimits(limits map[string]string) Option {
+	return func(opts *containerOptions) {
+		opts.limits = limits
 	}
 }

@@ -16,9 +16,13 @@ package image
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
+	"io"
 	"os"
+	"path"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
@@ -28,9 +32,6 @@ import (
 )
 
 func TestImage(t *testing.T) {
-	// ensure that experimental is enabled
-	os.Setenv("IG_EXPERIMENTAL", "true")
-
 	// start registry
 	r := StartRegistry(t, "test-image-registry")
 	t.Cleanup(func() {
@@ -47,6 +48,16 @@ func TestImage(t *testing.T) {
 	testTag := "tag1"
 	testLocalImage := fmt.Sprintf("%s/%s:%s", testReg, testRepo, testTag)
 	testRegistryImage := fmt.Sprintf("%s/%s:%s", registryAddr, testRepo, testTag)
+
+	tmpFolder := t.TempDir()
+	exportPath := path.Join(tmpFolder, "export.tar")
+	gadgetSrcFolder := path.Join(tmpFolder, "gadget")
+	err := os.MkdirAll(gadgetSrcFolder, 0o755)
+	require.NoError(t, err)
+
+	// create an empty eBPF program for the test as it compiles fine
+	_, err = os.Create(path.Join(gadgetSrcFolder, "program.bpf.c"))
+	require.NoError(t, err)
 
 	// ensure all images are removed
 	t.Cleanup(func() {
@@ -70,12 +81,14 @@ func TestImage(t *testing.T) {
 		negateExpected bool
 	}
 
+	// The order of these tests is important as one test depends on the previous
+	// one
 	testCases := []testCase{
 		{
 			name: "build",
 			cmd:  commonImage.NewBuildCmd(),
 			args: []string{
-				"--builder-image", *testBuilderImage, "--tag", testLocalImage, "../../../gadgets/trace_open",
+				"--builder-image", *testBuilderImage, "--tag", testLocalImage, gadgetSrcFolder,
 			},
 			expectedStdout: []string{
 				fmt.Sprintf("Successfully built %s", testLocalImage),
@@ -101,7 +114,7 @@ func TestImage(t *testing.T) {
 		{
 			name: "push",
 			cmd:  commonImage.NewPushCmd(),
-			args: []string{testRegistryImage, "--insecure"},
+			args: []string{testRegistryImage, "--insecure-registries", registryAddr},
 			expectedStdout: []string{
 				fmt.Sprintf("Successfully pushed %s", testRegistryImage),
 			},
@@ -109,7 +122,7 @@ func TestImage(t *testing.T) {
 		{
 			name: "push-invalid-image",
 			cmd:  commonImage.NewPushCmd(),
-			args: []string{"unknown", "--insecure"},
+			args: []string{"unknown", "--insecure-registries", registryAddr},
 			expectedStderr: []string{
 				"failed to resolve ghcr.io/inspektor-gadget/gadget/unknown:latest: not found",
 			},
@@ -117,7 +130,7 @@ func TestImage(t *testing.T) {
 		{
 			name: "push-unknown-tag",
 			cmd:  commonImage.NewPushCmd(),
-			args: []string{fmt.Sprintf("%s/%s:%s", registryAddr, testRepo, "unknown"), "--insecure"},
+			args: []string{fmt.Sprintf("%s/%s:%s", registryAddr, testRepo, "unknown"), "--insecure-registries", registryAddr},
 			expectedStderr: []string{
 				fmt.Sprintf("%s/%s:%s: not found", registryAddr, testRepo, "unknown"),
 			},
@@ -152,7 +165,7 @@ func TestImage(t *testing.T) {
 		{
 			name: "pull",
 			cmd:  commonImage.NewPullCmd(),
-			args: []string{testRegistryImage, "--insecure"},
+			args: []string{testRegistryImage, "--insecure-registries", registryAddr},
 			expectedStdout: []string{
 				fmt.Sprintf("Successfully pulled %s", testRegistryImage),
 			},
@@ -169,7 +182,7 @@ func TestImage(t *testing.T) {
 		{
 			name: "pull-invalid-image",
 			cmd:  commonImage.NewPullCmd(),
-			args: []string{"unknown", "--insecure"},
+			args: []string{"unknown", "--insecure-registries", registryAddr},
 			expectedStderr: []string{
 				"failed to resolve ghcr.io/inspektor-gadget/gadget/unknown:latest",
 			},
@@ -177,9 +190,25 @@ func TestImage(t *testing.T) {
 		{
 			name: "pull-unknown-tag",
 			cmd:  commonImage.NewPullCmd(),
-			args: []string{fmt.Sprintf("%s/%s:%s", registryAddr, testRepo, "unknown"), "--insecure"},
+			args: []string{fmt.Sprintf("%s/%s:%s", registryAddr, testRepo, "unknown"), "--insecure-registries", registryAddr},
 			expectedStderr: []string{
 				fmt.Sprintf("%s/%s:%s: not found", registryAddr, testRepo, "unknown"),
+			},
+		},
+		{
+			name: "export",
+			cmd:  commonImage.NewExportCmd(),
+			args: []string{testRegistryImage, exportPath},
+			expectedStdout: []string{
+				fmt.Sprintf("Successfully exported images to %s", exportPath),
+			},
+		},
+		{
+			name: "import",
+			cmd:  commonImage.NewImportCmd(),
+			args: []string{exportPath},
+			expectedStdout: []string{
+				fmt.Sprintf("Successfully imported images:\n  %s", testRegistryImage),
 			},
 		},
 	}
@@ -213,4 +242,60 @@ func TestImage(t *testing.T) {
 			}
 		})
 	}
+}
+
+func calculateSha256Sum(t *testing.T, filePath string) string {
+	t.Helper()
+
+	file, err := os.Open(filePath)
+	require.NoError(t, err)
+	defer file.Close()
+
+	hash := sha256.New()
+	_, err = io.Copy(hash, file)
+	require.NoError(t, err)
+
+	return fmt.Sprintf("%x", hash.Sum(nil))
+}
+
+func runCmd(t *testing.T, cmd *cobra.Command, args []string) {
+	t.Helper()
+
+	cmd.SetArgs(args)
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	err := cmd.Execute()
+	require.NoError(t, err)
+}
+
+func TestExportDeterministic(t *testing.T) {
+	testImage := "test-image-export"
+	tmpFolder := t.TempDir()
+	gadgetSrcFolder := path.Join(tmpFolder, "gadget")
+	err := os.MkdirAll(gadgetSrcFolder, 0o755)
+	require.NoError(t, err)
+
+	// create an empty eBPF program for the test as it compiles fine
+	_, err = os.Create(path.Join(gadgetSrcFolder, "program.bpf.c"))
+	require.NoError(t, err)
+
+	sums := make([]string, 2)
+
+	t.Setenv("SOURCE_DATE_EPOCH", fmt.Sprint(time.Now().Unix()))
+
+	// build and export the image
+	for i := 0; i < 2; i++ {
+		runCmd(t, commonImage.NewBuildCmd(), []string{
+			"--builder-image", *testBuilderImage, "--tag", testImage, gadgetSrcFolder,
+		})
+		exportPath := path.Join(tmpFolder, fmt.Sprintf("export%d.tar", i))
+		runCmd(t, commonImage.NewExportCmd(), []string{testImage, exportPath})
+		sums[i] = calculateSha256Sum(t, exportPath)
+
+		runCmd(t, commonImage.NewRemoveCmd(), []string{testImage})
+		os.Remove(exportPath)
+		time.Sleep(2 * time.Second) // ensure that the timestamp of the files is different
+	}
+
+	require.Equal(t, sums[0], sums[1])
 }

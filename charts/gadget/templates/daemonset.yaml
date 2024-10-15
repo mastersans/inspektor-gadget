@@ -80,13 +80,6 @@ spec:
               value: {{ .Values.config.hookMode | quote }}
             - name: INSPEKTOR_GADGET_OPTION_FALLBACK_POD_INFORMER
               value: {{ .Values.config.fallbackPodInformer | quote }}
-            # Make sure to keep these settings in sync with pkg/container-utils/runtime-client/interface.go
-            - name: INSPEKTOR_GADGET_CONTAINERD_SOCKETPATH
-              value: {{ .Values.config.containerdSocketPath | quote }}
-            - name: INSPEKTOR_GADGET_CRIO_SOCKETPATH
-              value: {{ .Values.config.crioSocketPath | quote }}
-            - name: INSPEKTOR_GADGET_DOCKER_SOCKETPATH
-              value: {{ .Values.config.dockerSocketPath | quote }}
             - name: HOST_ROOT
               value: "/host"
             - name: IG_EXPERIMENTAL
@@ -96,6 +89,7 @@ spec:
             - name: GADGET_TRACER_MANAGER_LOG_LEVEL
               value: {{ .Values.config.daemonLogLevel | quote }}
           securityContext:
+            readOnlyRootFilesystem: true
             # With hostPID/hostNetwork/privileged [1] set to false, we need to set appropriate
             # SELinux context [2] to be able to mount host directories with correct permissions.
             # This option is ignored if hostPID/hostNetwork/privileged is set to true or SELinux isn't enabled.
@@ -109,8 +103,8 @@ spec:
               drop:
                 - ALL
               add:
-                # We need CAP_SYS_ADMIN for both gadgettracermanager and
-                # bpftrace due to several syscalls:
+                # We need CAP_SYS_ADMIN for gadgettracermanager due to several
+                # syscalls:
                 # - bpf(): It often checks if SYS_ADMIN is set, among others
                 #   there:
                 #   https://github.com/torvalds/linux/blob/c42d9eeef8e5/kernel/bpf/syscall.c#L2602
@@ -146,8 +140,8 @@ spec:
                 # https://github.com/torvalds/linux/blob/c42d9eeef8e5/fs/proc/namespaces.c#L58
                 - SYS_PTRACE
 
-                # Needed by setrlimit in bpftrace:
-                # https://github.com/iovisor/bpftrace/blob/ab863ef93ac1/src/main.cpp#L154
+                # Needed by RemoveMemlock in gadgettracermanager:
+                # https://github.com/inspektor-gadget/inspektor-gadget/blob/f2b9826fc4ae046415cdee30ee4a25322fd3f0c0/pkg/gadgettracermanager/gadgettracermanager.go#L258
                 - SYS_RESOURCE
 
                 # Needed by mmap() called by gadgettracermanager:
@@ -184,6 +178,9 @@ spec:
             - mountPath: /host/run
               name: run
               readOnly: true
+            - mountPath: /host/var
+              name: var
+              readOnly: true
             # WARNING Despite mounting host proc as readonly, it is possible to
             # write host file system using symlinks under /host/proc. The
             # following command, ran from gadget pod, will result in writing to
@@ -201,13 +198,22 @@ spec:
               name: debugfs
             - mountPath: /sys/fs/cgroup
               name: cgroup
+              readOnly: true
             - mountPath: /sys/fs/bpf
               name: bpffs
+            # We need to add a dedicated volume to store OCI image otherwise it
+            # will fail as the container root filesystem is read only.
+            # For this, we use an emptyDir without size limit.
+            - mountPath: /var/lib/ig
+              name: oci
             {{- if .Values.config.mountPullSecret }}
             - mountPath: /var/run/secrets/gadget/pull-secret
               name: pull-secret
               readOnly: true
             {{- end }}
+            - mountPath: /etc/ig
+              name: config
+              readOnly: true
       nodeSelector:
         {{- .Values.nodeSelector | toYaml | nindent 8 }}
       affinity:
@@ -248,6 +254,11 @@ spec:
         - name: run
           hostPath:
             path: /run
+        # /var is needed by container-hook to fanoitfy mark certain directories
+        # e.g. needed in case of docker runtime on minikube (driver=kvm2)
+        - name: var
+          hostPath:
+            path: /var
         - name: cgroup
           hostPath:
             path: /sys/fs/cgroup
@@ -257,12 +268,18 @@ spec:
         - name: debugfs
           hostPath:
             path: /sys/kernel/debug
+        - name: oci
+          emptyDir:
         {{- if .Values.config.mountPullSecret }}
         - name: pull-secret
           secret:
-            defaultMode: 420
+            defaultMode: 0o400
             items:
               - key: .dockerconfigjson
                 path: config.json
             secretName: gadget-pull-secret
         {{- end }}
+        - name: config
+          configMap:
+            name: {{ include "gadget.fullname" . }}
+            defaultMode: 0o400

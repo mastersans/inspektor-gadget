@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	securejoin "github.com/cyphar/filepath-securejoin"
 	dockertypes "github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	dockerfilters "github.com/docker/docker/api/types/filters"
@@ -32,6 +33,7 @@ import (
 	runtimeclient "github.com/inspektor-gadget/inspektor-gadget/pkg/container-utils/runtime-client"
 	containerutilsTypes "github.com/inspektor-gadget/inspektor-gadget/pkg/container-utils/types"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/types"
+	"github.com/inspektor-gadget/inspektor-gadget/pkg/utils/host"
 )
 
 const (
@@ -56,8 +58,11 @@ func NewDockerClient(socketPath string, protocol string) (runtimeclient.Containe
 
 	case containerutilsTypes.RuntimeProtocolCRI:
 		// TODO: Configurable
-		socketPath = runtimeclient.CriDockerDefaultSocketPath
-		return cri.NewCRIClient(types.RuntimeNameDocker, socketPath, DefaultTimeout)
+		joinedSocketPath, err := securejoin.SecureJoin(host.HostRoot, runtimeclient.CriDockerDefaultSocketPath)
+		if err != nil {
+			return nil, fmt.Errorf("securejoining %v to %v: %w", host.HostRoot, runtimeclient.CriDockerDefaultSocketPath, err)
+		}
+		return cri.NewCRIClient(types.RuntimeNameDocker, joinedSocketPath, DefaultTimeout)
 
 	default:
 		return nil, fmt.Errorf("unknown runtime protocol %q", protocol)
@@ -180,6 +185,7 @@ func (c *DockerClient) GetContainerDetails(containerID string) (*runtimeclient.C
 		containerJSON.ID,
 		containerJSON.Name,
 		containerJSON.Config.Image,
+		c.getContainerImageDigest(containerJSON.Image),
 		containerJSON.State.Status,
 		containerJSON.Config.Labels)
 
@@ -230,6 +236,30 @@ func (c *DockerClient) Close() error {
 	return nil
 }
 
+// Gets the image digest for the given image ID, if the digest exists.
+// The digest is usually only available if the image was either pulled from a registry, or if the image was pushed to a registry, which is when the manifest is generated and its digest calculated.
+// Note: This function only works for already running containers and not for containers that are being created.
+func (c *DockerClient) getContainerImageDigest(imageId string) string {
+	imageInspect, _, err := c.client.ImageInspectWithRaw(context.Background(), imageId)
+	if err != nil {
+		log.Warnf("Failed to get image digest for image %s: %s", imageId, err)
+		return ""
+	}
+
+	if len(imageInspect.RepoDigests) == 0 {
+		log.Warnf("No digest found for image %s", imageId)
+		return ""
+	}
+
+	imageAndDigest := strings.Split(imageInspect.RepoDigests[0], "@")
+	if len(imageAndDigest) < 2 {
+		log.Warnf("Digest is in wrong format for image %s", imageId)
+		return ""
+	}
+
+	return imageAndDigest[1]
+}
+
 // Convert the state from container status to state of runtime client.
 func containerStatusStateToRuntimeClientState(containerState string) (runtimeClientState string) {
 	switch containerState {
@@ -248,10 +278,12 @@ func containerStatusStateToRuntimeClientState(containerState string) (runtimeCli
 }
 
 func DockerContainerToContainerData(container *dockertypes.Container) *runtimeclient.ContainerData {
+	imageDigest := ""
 	return buildContainerData(
 		container.ID,
 		container.Names[0],
 		container.Image,
+		imageDigest,
 		container.State,
 		container.Labels)
 }
@@ -283,14 +315,15 @@ func getContainerImageNamefromImage(image string) string {
 // `buildContainerData` takes in basic metadata about a Docker container and
 // constructs a `runtimeclient.ContainerData` struct with this information. I also
 // enriches containers with the data and returns a pointer the created struct.
-func buildContainerData(containerID string, containerName string, containerImage string, state string, labels map[string]string) *runtimeclient.ContainerData {
+func buildContainerData(containerID string, containerName string, containerImage string, containerImageDigest string, state string, labels map[string]string) *runtimeclient.ContainerData {
 	containerData := runtimeclient.ContainerData{
 		Runtime: runtimeclient.RuntimeContainerData{
 			BasicRuntimeMetadata: types.BasicRuntimeMetadata{
-				ContainerID:        containerID,
-				ContainerName:      strings.TrimPrefix(containerName, "/"),
-				RuntimeName:        types.RuntimeNameDocker,
-				ContainerImageName: getContainerImageNamefromImage(containerImage),
+				ContainerID:          containerID,
+				ContainerName:        strings.TrimPrefix(containerName, "/"),
+				RuntimeName:          types.RuntimeNameDocker,
+				ContainerImageName:   getContainerImageNamefromImage(containerImage),
+				ContainerImageDigest: containerImageDigest,
 			},
 			State: containerStatusStateToRuntimeClientState(state),
 		},

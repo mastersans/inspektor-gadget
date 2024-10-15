@@ -517,64 +517,69 @@ func WithKubernetesEnrichment(nodeName string, kubeconfig *rest.Config) Containe
 
 		// Future containers
 		cc.containerEnrichers = append(cc.containerEnrichers, func(container *Container) bool {
-			// Skip enriching if all k8s fields are already known.
+			// Skip enriching if basic k8s fields are already known.
 			// This is an optimization and to make sure to avoid erasing the fields in case of error.
-			if runtimeclient.IsEnrichedWithK8sMetadata(container.K8s.BasicK8sMetadata) {
-				return true
-			}
-
-			var pod *corev1.Pod
-			var err error
-			if container.K8s.PodName == "" || container.K8s.Namespace == "" {
-				pod, err = getPodByCgroups(clientset, nodeName, container)
-				if err != nil {
-					log.Errorf("kubernetes enricher (from UID): cannot find pod for container %s: %s", container.Runtime.ContainerName, err)
-					return false
-				}
-			} else {
-				pod, err = clientset.CoreV1().Pods(container.K8s.Namespace).Get(context.TODO(), container.K8s.PodName, metav1.GetOptions{})
-				if err != nil {
-					log.Errorf("kubernetes enricher (from ns/podname): cannot find pod %s/%s: %s", container.K8s.Namespace, container.K8s.PodName, err)
-					return false
-				}
-			}
-
-			if container.K8s.ContainerName == "" {
-				var containerName string
-				uid := string(pod.ObjectMeta.UID)
-				containerNames := []string{}
-				for _, c := range pod.Spec.Containers {
-					containerNames = append(containerNames, c.Name)
-				}
-				for _, c := range pod.Spec.InitContainers {
-					containerNames = append(containerNames, c.Name)
-				}
-				for _, c := range pod.Spec.EphemeralContainers {
-					containerNames = append(containerNames, c.Name)
-				}
-			outerLoop:
-				for _, name := range containerNames {
-					for _, m := range container.OciConfig.Mounts {
-						pattern := fmt.Sprintf("pods/%s/containers/%s/", uid, name)
-						if strings.Contains(m.Source, pattern) {
-							containerName = name
-							break outerLoop
-						}
+			if !runtimeclient.IsEnrichedWithK8sMetadata(container.K8s.BasicK8sMetadata) {
+				var pod *corev1.Pod
+				var err error
+				if container.K8s.PodName == "" || container.K8s.Namespace == "" {
+					pod, err = getPodByCgroups(clientset, nodeName, container)
+					if err != nil {
+						log.Errorf("kubernetes enricher (from UID): cannot find pod for container %s: %s", container.Runtime.ContainerName, err)
+						return false
+					}
+				} else {
+					pod, err = clientset.CoreV1().Pods(container.K8s.Namespace).Get(context.TODO(), container.K8s.PodName, metav1.GetOptions{})
+					if err != nil {
+						log.Errorf("kubernetes enricher (from ns/podname): cannot find pod %s/%s: %s", container.K8s.Namespace, container.K8s.PodName, err)
+						return false
 					}
 				}
-				container.K8s.ContainerName = containerName
+
+				if container.K8s.ContainerName == "" {
+					var containerName string
+					uid := string(pod.ObjectMeta.UID)
+					containerNames := []string{}
+					for _, c := range pod.Spec.Containers {
+						containerNames = append(containerNames, c.Name)
+					}
+					for _, c := range pod.Spec.InitContainers {
+						containerNames = append(containerNames, c.Name)
+					}
+					for _, c := range pod.Spec.EphemeralContainers {
+						containerNames = append(containerNames, c.Name)
+					}
+				outerLoop:
+					for _, name := range containerNames {
+						for _, m := range container.OciConfig.Mounts {
+							pattern := fmt.Sprintf("pods/%s/containers/%s/", uid, name)
+							if strings.Contains(m.Source, pattern) {
+								containerName = name
+								break outerLoop
+							}
+						}
+					}
+					container.K8s.ContainerName = containerName
+				}
+
+				container.K8s.Namespace = pod.ObjectMeta.Namespace
+				container.K8s.PodName = pod.ObjectMeta.Name
+				container.K8s.PodUID = string(pod.ObjectMeta.UID)
+				container.K8s.PodLabels = pod.ObjectMeta.Labels
+
+				// drop pause containers
+				if container.K8s.PodName != "" && container.K8s.ContainerName == "" {
+					return false
+				}
 			}
 
-			container.K8s.Namespace = pod.ObjectMeta.Namespace
-			container.K8s.PodName = pod.ObjectMeta.Name
-			container.K8s.PodUID = string(pod.ObjectMeta.UID)
-			container.K8s.PodLabels = pod.ObjectMeta.Labels
-
-			// drop pause containers
-			if container.K8s.PodName != "" && container.K8s.ContainerName == "" {
-				return false
+			if container.K8s.ownerReference == nil {
+				_, err = container.GetOwnerReference()
+				if err != nil {
+					log.Errorf("kubernetes enricher: failed to get owner reference for container %s: %s", container.Runtime.ContainerID, err)
+					// Don't drop the container. We just have problems getting the owner reference, but still want to trace the container.
+				}
 			}
-
 			return true
 		})
 		return nil
@@ -907,6 +912,29 @@ func WithTracerCollection(tc TracerCollection) ContainerCollectionOption {
 
 		cc.pubsub.Subscribe("tracercollection", tc.TracerMapsUpdater(), nil)
 
+		return nil
+	}
+}
+
+// WithProcEnrichment enables an enricher to add process metadata
+func WithProcEnrichment() ContainerCollectionOption {
+	return func(cc *ContainerCollection) error {
+		cc.containerEnrichers = append(cc.containerEnrichers, func(container *Container) bool {
+			pid := int(container.Pid)
+			if pid == 0 {
+				log.Errorf("proc enricher: failed to enrich container %s with pid zero", container.Runtime.ContainerID)
+				return false
+			}
+
+			procStat, err := host.GetProcStat(pid)
+			if err != nil {
+				log.Errorf("proc enricher: failed to read /proc/%d/stat for container %s: %v", pid, container.Runtime.ContainerID, err)
+				return false
+			}
+
+			container.Runtime.ContainerStartedAt = procStat.StartedAt
+			return true
+		})
 		return nil
 	}
 }

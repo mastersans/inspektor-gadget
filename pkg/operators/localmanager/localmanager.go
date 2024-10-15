@@ -1,4 +1,4 @@
-// Copyright 2022-2023 The Inspektor Gadget authors
+// Copyright 2022-2024 The Inspektor Gadget authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,10 +17,13 @@ package localmanager
 import (
 	"errors"
 	"fmt"
+	"os"
+	"slices"
 	"strings"
 
 	"github.com/cilium/ebpf"
 	"github.com/containerd/containerd/pkg/cri/constants"
+	securejoin "github.com/cyphar/filepath-securejoin"
 	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
 
@@ -29,25 +32,30 @@ import (
 	containerutils "github.com/inspektor-gadget/inspektor-gadget/pkg/container-utils"
 	runtimeclient "github.com/inspektor-gadget/inspektor-gadget/pkg/container-utils/runtime-client"
 	containerutilsTypes "github.com/inspektor-gadget/inspektor-gadget/pkg/container-utils/types"
+	"github.com/inspektor-gadget/inspektor-gadget/pkg/datasource"
+	"github.com/inspektor-gadget/inspektor-gadget/pkg/datasource/compat"
+	"github.com/inspektor-gadget/inspektor-gadget/pkg/gadget-service/api"
+	apihelpers "github.com/inspektor-gadget/inspektor-gadget/pkg/gadget-service/api-helpers"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/gadgets"
 	igmanager "github.com/inspektor-gadget/inspektor-gadget/pkg/ig-manager"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/operators"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/params"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/types"
+	"github.com/inspektor-gadget/inspektor-gadget/pkg/utils/host"
 )
 
 const (
-	OperatorName         = "LocalManager"
-	OperatorInstanceName = "LocalManagerTrace"
-	Runtimes             = "runtimes"
-	ContainerName        = "containername"
-	Host                 = "host"
-	DockerSocketPath     = "docker-socketpath"
-	ContainerdSocketPath = "containerd-socketpath"
-	CrioSocketPath       = "crio-socketpath"
-	PodmanSocketPath     = "podman-socketpath"
-	ContainerdNamespace  = "containerd-namespace"
-	RuntimeProtocol      = "runtime-protocol"
+	OperatorName           = "LocalManager"
+	Runtimes               = "runtimes"
+	ContainerName          = "containername"
+	Host                   = "host"
+	DockerSocketPath       = "docker-socketpath"
+	ContainerdSocketPath   = "containerd-socketpath"
+	CrioSocketPath         = "crio-socketpath"
+	PodmanSocketPath       = "podman-socketpath"
+	ContainerdNamespace    = "containerd-namespace"
+	RuntimeProtocol        = "runtime-protocol"
+	EnrichWithK8sApiserver = "enrich-with-k8s-apiserver"
 )
 
 type MountNsMapSetter interface {
@@ -60,8 +68,9 @@ type Attacher interface {
 }
 
 type LocalManager struct {
-	igManager *igmanager.IGManager
-	rc        []*containerutilsTypes.RuntimeConfig
+	igManager     *igmanager.IGManager
+	rc            []*containerutilsTypes.RuntimeConfig
+	fakeContainer *containercollection.Container
 }
 
 func (l *LocalManager) Name() string {
@@ -82,7 +91,7 @@ func (l *LocalManager) GlobalParamDescs() params.ParamDescs {
 			Key:          Runtimes,
 			Alias:        "r",
 			DefaultValue: strings.Join(containerutils.AvailableRuntimes, ","),
-			Description: fmt.Sprintf("Container runtimes to be used separated by comma. Supported values are: %s",
+			Description: fmt.Sprintf("Comma-separated list of container runtimes. Supported values are: %s",
 				strings.Join(containerutils.AvailableRuntimes, ", ")),
 			// PossibleValues: containerutils.AvailableRuntimes, // TODO
 		},
@@ -115,6 +124,12 @@ func (l *LocalManager) GlobalParamDescs() params.ParamDescs {
 			Key:          RuntimeProtocol,
 			DefaultValue: "internal",
 			Description:  "Container runtime protocol. Supported values are: internal, cri",
+		},
+		{
+			Key:          EnrichWithK8sApiserver,
+			DefaultValue: "false",
+			Description:  "Connect to the K8s API server to get further K8s enrichment",
+			TypeHint:     params.TypeBool,
 		},
 	}
 }
@@ -168,40 +183,54 @@ func (l *LocalManager) CanOperateOn(gadget gadgets.GadgetDesc) bool {
 
 func (l *LocalManager) Init(operatorParams *params.Params) error {
 	rc := make([]*containerutilsTypes.RuntimeConfig, 0)
-	parts := operatorParams.Get(Runtimes).AsStringSlice()
 
-partsLoop:
-	for _, p := range parts {
-		runtimeName := types.String2RuntimeName(strings.TrimSpace(p))
-		socketPath := ""
+	runtimesParam := operatorParams.Get(Runtimes)
+	runtimesIsSet := runtimesParam.IsSet()
+	runtimes := runtimesParam.AsStringSlice()
+	slices.Sort(runtimes)
+	runtimes = slices.Compact(runtimes)
+
+	for _, runtime := range runtimes {
+		runtimeName := types.String2RuntimeName(strings.TrimSpace(runtime))
 		namespace := ""
+
+		var socketPathParam *params.Param
 
 		switch runtimeName {
 		case types.RuntimeNameDocker:
-			socketPath = operatorParams.Get(DockerSocketPath).AsString()
+			socketPathParam = operatorParams.Get(DockerSocketPath)
 		case types.RuntimeNameContainerd:
-			socketPath = operatorParams.Get(ContainerdSocketPath).AsString()
+			socketPathParam = operatorParams.Get(ContainerdSocketPath)
 			namespace = operatorParams.Get(ContainerdNamespace).AsString()
 		case types.RuntimeNameCrio:
-			socketPath = operatorParams.Get(CrioSocketPath).AsString()
+			socketPathParam = operatorParams.Get(CrioSocketPath)
 		case types.RuntimeNamePodman:
-			socketPath = operatorParams.Get(PodmanSocketPath).AsString()
+			socketPathParam = operatorParams.Get(PodmanSocketPath)
 		default:
 			return commonutils.WrapInErrInvalidArg("--runtime / -r",
-				fmt.Errorf("runtime %q is not supported", p))
+				fmt.Errorf("runtime %q is not supported", runtime))
 		}
 
-		for _, r := range rc {
-			if r.Name == runtimeName {
-				log.Infof("Ignoring duplicated runtime %q from %v",
-					runtimeName, parts)
-				continue partsLoop
+		socketPath := socketPathParam.AsString()
+		socketPathIsSet := socketPathParam.IsSet()
+
+		cleanSocketPath, err := securejoin.SecureJoin(host.HostRoot, socketPath)
+		if err != nil {
+			log.Debugf("securejoin failed: %s", err)
+			continue
+		}
+
+		if _, err := os.Stat(cleanSocketPath); err != nil {
+			if socketPathIsSet || runtimesIsSet {
+				return fmt.Errorf("runtime %q with non-existent socketPath %q", runtimeName, socketPath)
 			}
+			log.Debugf("Ignoring runtime %q with non-existent socketPath %q", runtimeName, socketPath)
+			continue
 		}
 
 		r := &containerutilsTypes.RuntimeConfig{
 			Name:            runtimeName,
-			SocketPath:      socketPath,
+			SocketPath:      cleanSocketPath,
 			RuntimeProtocol: operatorParams.Get(RuntimeProtocol).AsString(),
 			Extra: containerutilsTypes.ExtraConfig{
 				Namespace: namespace,
@@ -213,7 +242,26 @@ partsLoop:
 
 	l.rc = rc
 
-	igManager, err := igmanager.NewManager(l.rc)
+	pidOne := uint32(1)
+	mntns, err := containerutils.GetMntNs(int(pidOne))
+	if err != nil {
+		return fmt.Errorf("getting mount namespace ID for host PID %d: %w", pidOne, err)
+	}
+
+	// We need this fake container for gadget which rely only on the Attacher
+	// concept:
+	// * Network gadget will get the netns corresponding to PID 1 on their
+	//   own.
+	// * Others, like traceloop or advise seccomp-profile, need the mount
+	//   namespace ID to bet set.
+	l.fakeContainer = &containercollection.Container{Pid: pidOne, Mntns: mntns}
+
+	additionalOpts := []containercollection.ContainerCollectionOption{}
+	if operatorParams.Get(EnrichWithK8sApiserver).AsBool() {
+		additionalOpts = append(additionalOpts, containercollection.WithKubernetesEnrichment("", nil))
+	}
+
+	igManager, err := igmanager.NewManager(l.rc, additionalOpts)
 	if err != nil {
 		log.Warnf("Failed to create container-collection")
 		log.Debugf("Failed to create container-collection: %s", err)
@@ -262,10 +310,12 @@ type localManagerTrace struct {
 	params             *params.Params
 	gadgetInstance     any
 	gadgetCtx          operators.GadgetContext
+
+	eventWrappers map[datasource.DataSource]*compat.EventWrapperBase
 }
 
 func (l *localManagerTrace) Name() string {
-	return OperatorInstanceName
+	return OperatorName
 }
 
 func (l *localManagerTrace) PreGadgetRun() error {
@@ -348,7 +398,7 @@ func (l *localManagerTrace) PreGadgetRun() error {
 
 		if l.manager.igManager != nil {
 			l.subscriptionKey = id.String()
-			log.Debugf("add subscription")
+			log.Debugf("add subscription to igManager")
 			containers = l.manager.igManager.Subscribe(
 				l.subscriptionKey,
 				containerSelector,
@@ -365,9 +415,7 @@ func (l *localManagerTrace) PreGadgetRun() error {
 		}
 
 		if host {
-			// We need to attach this fake container for gadget which rely only on the
-			// Attacher concept.
-			containers = append(containers, &containercollection.Container{Pid: 1})
+			containers = append(containers, l.manager.fakeContainer)
 		}
 
 		for _, container := range containers {
@@ -396,9 +444,7 @@ func (l *localManagerTrace) PostGadgetRun() error {
 			}
 
 			if host {
-				// Reciprocal operation of attaching fake container with PID 1 which is
-				// needed by gadgets relying on the Attacher concept.
-				l.attacher.DetachContainer(&containercollection.Container{Pid: 1})
+				l.attacher.DetachContainer(l.manager.fakeContainer)
 			}
 		}
 	}
@@ -422,6 +468,158 @@ func (l *localManagerTrace) EnrichEvent(ev any) error {
 	return nil
 }
 
+type localManagerTraceWrapper struct {
+	localManagerTrace
+	runID string
+}
+
+func (l *LocalManager) GlobalParams() api.Params {
+	return apihelpers.ParamDescsToParams(l.GlobalParamDescs())
+}
+
+func (l *LocalManager) InstanceParams() api.Params {
+	return apihelpers.ParamDescsToParams(l.ParamDescs())
+}
+
+func (l *LocalManager) InstantiateDataOperator(gadgetCtx operators.GadgetContext, paramValues api.ParamValues) (
+	operators.DataOperatorInstance, error,
+) {
+	params := l.ParamDescs().ToParams()
+	err := params.CopyFromMap(paramValues, "")
+	if err != nil {
+		return nil, err
+	}
+
+	// Wrapper is used to have ParamDescs() with the new signature
+	traceInstance := &localManagerTraceWrapper{
+		localManagerTrace: localManagerTrace{
+			manager:            l,
+			enrichEvents:       false,
+			attachedContainers: make(map[*containercollection.Container]struct{}),
+			params:             params,
+			gadgetCtx:          gadgetCtx,
+			eventWrappers:      make(map[datasource.DataSource]*compat.EventWrapperBase),
+		},
+	}
+
+	activate := false
+
+	// Check, whether the gadget requested a map from us
+	if t, ok := gadgetCtx.GetVar(gadgets.MntNsFilterMapName); ok {
+		if _, ok := t.(*ebpf.Map); ok {
+			gadgetCtx.Logger().Debugf("gadget requested map %s", gadgets.MntNsFilterMapName)
+			activate = true
+		}
+	}
+
+	// Check for override - currently needed for tchandlers
+	if val, ok := gadgetCtx.GetVar("NeedContainerEvents"); ok {
+		if b, ok := val.(bool); ok && b {
+			activate = true
+		}
+	}
+
+	wrappers, err := compat.GetEventWrappers(gadgetCtx)
+	if err != nil {
+		return nil, fmt.Errorf("getting event wrappers: %w", err)
+	}
+	traceInstance.eventWrappers = wrappers
+	if len(wrappers) > 0 {
+		activate = true
+	}
+
+	if !activate {
+		return nil, nil
+	}
+
+	return traceInstance, nil
+}
+
+func (l *localManagerTrace) ParamDescs() params.ParamDescs {
+	return params.ParamDescs{
+		{
+			Key:         ContainerName,
+			Alias:       "c",
+			Description: "Show only data from containers with that name",
+			ValueHint:   gadgets.LocalContainer,
+		},
+		{
+			Key:          Host,
+			Description:  "Show data from both the host and containers",
+			DefaultValue: "false",
+			TypeHint:     params.TypeBool,
+		},
+	}
+}
+
+func (l *localManagerTraceWrapper) ParamDescs(gadgetCtx operators.GadgetContext) params.ParamDescs {
+	return l.localManagerTrace.ParamDescs()
+}
+
+func (l *LocalManager) Priority() int {
+	return -1
+}
+
+func (l *localManagerTraceWrapper) PreStart(gadgetCtx operators.GadgetContext) error {
+	// hack - this makes it possible to use the Attacher interface
+	var ok bool
+	l.gadgetInstance, ok = gadgetCtx.GetVar("ebpfInstance")
+	if !ok {
+		return fmt.Errorf("getting ebpfInstance")
+	}
+
+	if l.manager.igManager != nil {
+		compat.Subscribe(
+			l.eventWrappers,
+			l.manager.igManager.ContainerCollection.EnrichEventByMntNs,
+			l.manager.igManager.ContainerCollection.EnrichEventByNetNs,
+			0,
+		)
+	}
+
+	id := uuid.New()
+	host := l.params.Get(Host).AsBool()
+
+	containerSelector := containercollection.ContainerSelector{
+		Runtime: containercollection.RuntimeSelector{
+			ContainerName: l.params.Get(ContainerName).AsString(),
+		},
+	}
+
+	// mountnsmap will be handled differently than above
+	if !host {
+		if l.manager.igManager == nil {
+			return fmt.Errorf("container-collection isn't available")
+		}
+
+		// Create mount namespace map to filter by containers
+		mountnsmap, err := l.manager.igManager.CreateMountNsMap(id.String(), containerSelector)
+		if err != nil {
+			return commonutils.WrapInErrManagerCreateMountNsMap(err)
+		}
+
+		gadgetCtx.Logger().Debugf("set mountnsmap for gadget")
+		gadgetCtx.SetVar(gadgets.MntNsFilterMapName, mountnsmap)
+		gadgetCtx.SetVar(gadgets.FilterByMntNsName, true)
+
+		l.mountnsmap = mountnsmap
+	} else if l.manager.igManager == nil {
+		log.Warn("container-collection isn't available: container enrichment and filtering won't work")
+	}
+
+	return l.PreGadgetRun()
+}
+
+func (l *localManagerTraceWrapper) Start(gadgetCtx operators.GadgetContext) error {
+	return nil
+}
+
+func (l *localManagerTraceWrapper) Stop(gadgetCtx operators.GadgetContext) error {
+	return l.PostGadgetRun()
+}
+
 func init() {
-	operators.Register(&LocalManager{})
+	lm := &LocalManager{}
+	operators.Register(lm)
+	operators.RegisterDataOperator(lm)
 }

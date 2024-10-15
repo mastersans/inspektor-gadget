@@ -9,6 +9,7 @@
 #include <gadget/macros.h>
 #include <gadget/mntns_filter.h>
 #include <gadget/types.h>
+#include <gadget/filesystem.h>
 
 // Defined in include/uapi/linux/magic.h
 #define OVERLAYFS_SUPER_MAGIC 0x794c7630
@@ -23,31 +24,56 @@
 #define LAST_ARG (FULL_MAX_ARGS_ARR - ARGSIZE)
 
 struct event {
+	gadget_timestamp timestamp_raw;
 	gadget_mntns_id mntns_id;
-	gadget_timestamp timestamp;
+
+	char comm[TASK_COMM_LEN];
+	// user-space terminology for pid and tid
 	__u32 pid;
+	__u32 tid;
+	gadget_uid uid;
+	gadget_gid gid;
+
+	char pcomm[TASK_COMM_LEN];
 	__u32 ppid;
-	__u32 uid;
-	__u32 gid;
-	__u32 loginuid;
+	gadget_uid loginuid;
 	__u32 sessionid;
-	int retval;
+	gadget_errno error_raw;
 	int args_count;
 	bool upper_layer;
+	bool pupper_layer;
 	unsigned int args_size;
-	__u8 comm[TASK_COMM_LEN];
-	__u8 args[FULL_MAX_ARGS_ARR];
+	char cwd[MAX_STRING_SIZE];
+	char args[FULL_MAX_ARGS_ARR];
 };
 
 const volatile bool ignore_failed = true;
 const volatile uid_t targ_uid = INVALID_UID;
 const volatile int max_args = DEFAULT_MAXARGS;
+const volatile bool paths = false;
 
 GADGET_PARAM(ignore_failed);
 GADGET_PARAM(targ_uid);
+GADGET_PARAM(paths);
 
 static const struct event empty_event = {};
 
+// man clone(2):
+//   If any of the threads in a thread group performs an
+//   execve(2), then all threads other than the thread group
+//   leader are terminated, and the new program is executed in
+//   the thread group leader.
+//
+// sys_enter_execve might be called from a thread and the corresponding
+// sys_exit_execve will be called from the thread group leader in case of
+// execve success, or from the same thread in case of execve failure.
+//
+// Moreover, checking ctx->ret == 0 is not a reliable way to distinguish
+// successful execve from failed execve because seccomp can change ctx->ret.
+//
+// Therefore, use two different tracepoints to handle the map cleanup:
+// - tracepoint/sched/sched_process_exec is called after a successful execve
+// - tracepoint/syscalls/sys_exit_execve is always called
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, 10240);
@@ -59,36 +85,6 @@ GADGET_TRACER_MAP(events, 1024 * 256);
 
 GADGET_TRACER(exec, events, event);
 
-// man clone(2):
-//   If any of the threads in a thread group performs an
-//   execve(2), then all threads other than the thread group
-//   leader are terminated, and the new program is executed in
-//   the thread group leader.
-//
-// sys_enter_execve might be called from a thread and the corresponding
-// sys_exit_execve will be called from the thread group leader in case of
-// execve success, or from the same thread in case of execve failure. So we
-// need to lookup the pid from the tgid in sys_exit_execve.
-//
-// We don't know in advance which execve(2) will succeed, so we need to keep
-// track of all tgid<->pid mappings in a BPF map.
-//
-// We don't want to use bpf_for_each_map_elem() because it requires Linux 5.13.
-//
-// If several execve(2) are performed in parallel from different threads, only
-// one can succeed. The kernel will run the tracepoint syscalls/sys_exit_execve
-// for the failing execve(2) first and then for the successful one last.
-//
-// So we can insert a tgid->pid mapping in the same hash entry by modulo adding
-// the pid in value and removing it by subtracting. By the time we need to
-// lookup the pid by the tgid, there will be only one pid left in the hash entry.
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__type(key, pid_t); // tgid
-	__type(value, u64); // sum of pids
-	__uint(max_entries, 1024);
-} pid_by_tgid SEC(".maps");
-
 static __always_inline bool valid_uid(uid_t uid)
 {
 	return uid != INVALID_UID;
@@ -99,8 +95,6 @@ int ig_execve_e(struct syscall_trace_enter *ctx)
 {
 	u64 id;
 	pid_t pid, tgid;
-	u64 zero64 = 0;
-	u64 *pid_sum;
 	struct event *event;
 	struct task_struct *task;
 	unsigned int ret;
@@ -131,16 +125,9 @@ int ig_execve_e(struct syscall_trace_enter *ctx)
 	if (!event)
 		return 0;
 
-	bpf_map_update_elem(&pid_by_tgid, &tgid, &zero64, BPF_NOEXIST);
-
-	pid_sum = bpf_map_lookup_elem(&pid_by_tgid, &tgid);
-	if (!pid_sum)
-		return 0;
-
-	__atomic_add_fetch(pid_sum, (u64)pid, __ATOMIC_RELAXED);
-
-	event->timestamp = bpf_ktime_get_boot_ns();
+	event->timestamp_raw = bpf_ktime_get_boot_ns();
 	event->pid = tgid;
+	event->tid = pid;
 	event->uid = uid;
 	event->gid = gid;
 	event->loginuid = BPF_CORE_READ(task, loginuid.val);
@@ -149,6 +136,12 @@ int ig_execve_e(struct syscall_trace_enter *ctx)
 	event->args_count = 0;
 	event->args_size = 0;
 	event->mntns_id = mntns_id;
+
+	if (paths) {
+		struct fs_struct *fs = BPF_CORE_READ(task, fs);
+		char *cwd = get_path_str(&fs->pwd);
+		bpf_probe_read_kernel_str(event->cwd, MAX_STRING_SIZE, cwd);
+	}
 
 	ret = bpf_probe_read_user_str(event->args, ARGSIZE,
 				      (const char *)ctx->args[0]);
@@ -188,13 +181,8 @@ int ig_execve_e(struct syscall_trace_enter *ctx)
 	return 0;
 }
 
-static __always_inline bool has_upper_layer()
+static __always_inline bool has_upper_layer(struct inode *inode)
 {
-	struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-	struct inode *inode = BPF_CORE_READ(task, mm, exe_file, f_inode);
-	if (!inode) {
-		return false;
-	}
 	unsigned long sb_magic = BPF_CORE_READ(inode, i_sb, s_magic);
 
 	if (sb_magic != OVERLAYFS_SUPER_MAGIC) {
@@ -215,54 +203,76 @@ static __always_inline bool has_upper_layer()
 	return upperdentry != NULL;
 }
 
+// tracepoint/sched/sched_process_exec is called after a successful execve
+SEC("tracepoint/sched/sched_process_exec")
+int ig_sched_exec(struct trace_event_raw_sched_process_exec *ctx)
+{
+	u32 execs_lookup_key = ctx->old_pid;
+	struct event *event;
+	struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+	struct task_struct *parent = BPF_CORE_READ(task, real_parent);
+
+	event = bpf_map_lookup_elem(&execs, &execs_lookup_key);
+	if (!event)
+		return 0;
+
+	struct inode *inode = BPF_CORE_READ(task, mm, exe_file, f_inode);
+	if (inode)
+		event->upper_layer = has_upper_layer(inode);
+
+	struct inode *pinode = BPF_CORE_READ(parent, mm, exe_file, f_inode);
+	if (pinode)
+		event->pupper_layer = has_upper_layer(pinode);
+
+	event->error_raw = 0;
+	bpf_get_current_comm(&event->comm, sizeof(event->comm));
+	if (parent != NULL) {
+		bpf_probe_read_kernel(&event->pcomm, sizeof(event->pcomm),
+				      parent->comm);
+	}
+
+	size_t len = EVENT_SIZE(event);
+	if (len <= sizeof(*event))
+		gadget_output_buf(ctx, &events, event, len);
+
+	bpf_map_delete_elem(&execs, &execs_lookup_key);
+
+	return 0;
+}
+
+// We use syscalls/sys_exit_execve only to trace failed execve
+// This program is needed regardless of ignore_failed
 SEC("tracepoint/syscalls/sys_exit_execve")
 int ig_execve_x(struct syscall_trace_exit *ctx)
 {
-	u64 id;
-	pid_t pid, tgid;
-	pid_t execs_lookup_key;
-	u64 *pid_sum;
-	int ret;
+	u32 pid = (u32)bpf_get_current_pid_tgid();
 	struct event *event;
-	u32 uid = (u32)bpf_get_current_uid_gid();
+	struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+	struct task_struct *parent = BPF_CORE_READ(task, real_parent);
 
-	if (valid_uid(targ_uid) && targ_uid != uid)
-		return 0;
-	id = bpf_get_current_pid_tgid();
-	pid = (pid_t)id;
-	tgid = id >> 32;
-	ret = ctx->ret;
-
-	pid_sum = bpf_map_lookup_elem(&pid_by_tgid, &tgid);
-	if (!pid_sum)
-		return 0;
-
-	// sys_enter_execve and sys_exit_execve might be called from different
-	// threads. We need to lookup the pid from the tgid.
-	execs_lookup_key = (ret == 0) ? (pid_t)*pid_sum : pid;
-	event = bpf_map_lookup_elem(&execs, &execs_lookup_key);
-
-	// Remove the tgid->pid mapping if the value reaches 0
-	// or the execve() call was successful
-	__atomic_add_fetch(pid_sum, (u64)-pid, __ATOMIC_RELAXED);
-	if (*pid_sum == 0 || ret == 0)
-		bpf_map_delete_elem(&pid_by_tgid, &tgid);
-
+	// If the execve was successful, sched/sched_process_exec handled the event
+	// already and deleted the entry. So if we find the entry, it means the
+	// the execve failed.
+	event = bpf_map_lookup_elem(&execs, &pid);
 	if (!event)
 		return 0;
-	if (ignore_failed && ret < 0)
+
+	if (ignore_failed)
 		goto cleanup;
 
-	if (ret == 0)
-		event->upper_layer = has_upper_layer();
-
-	event->retval = ret;
+	event->error_raw = -ctx->ret;
 	bpf_get_current_comm(&event->comm, sizeof(event->comm));
+
+	if (parent != NULL) {
+		bpf_probe_read_kernel(&event->pcomm, sizeof(event->pcomm),
+				      parent->comm);
+	}
+
 	size_t len = EVENT_SIZE(event);
 	if (len <= sizeof(*event))
 		gadget_output_buf(ctx, &events, event, len);
 cleanup:
-	bpf_map_delete_elem(&execs, &execs_lookup_key);
+	bpf_map_delete_elem(&execs, &pid);
 	return 0;
 }
 

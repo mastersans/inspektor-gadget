@@ -37,42 +37,44 @@ import (
 
 // needs to be kept in sync with execsnoopEvent from execsnoop_bpfel.go without the Args field
 type execsnoopEventAbbrev struct {
-	MntnsId    uint64
-	Timestamp  uint64
-	Pid        uint32
-	Ppid       uint32
-	Uid        uint32
-	Gid        uint32
-	Loginuid   uint32
-	Sessionid  uint32
-	Retval     int32
-	ArgsCount  int32
-	UpperLayer bool
-	_          [3]byte
-	ArgsSize   uint32
-	Comm       [16]uint8
-	Pcomm      [16]uint8
+	MntnsId     uint64
+	Timestamp   uint64
+	Pid         uint32
+	Ppid        uint32
+	Uid         uint32
+	Gid         uint32
+	Loginuid    uint32
+	Sessionid   uint32
+	Retval      int32
+	ArgsCount   int32
+	UpperLayer  bool
+	PupperLayer bool
+	_           [2]byte
+	ArgsSize    uint32
+	Comm        [16]uint8
+	Pcomm       [16]uint8
 }
 
 // needs to be kept in sync with execsnoopWithLongPathsEvent from execsnoopwithlongpaths_bpfel.go without the Args field
 type execsnoopWithLongPathsEventAbbrev struct {
-	MntnsId    uint64
-	Timestamp  uint64
-	Pid        uint32
-	Ppid       uint32
-	Uid        uint32
-	Gid        uint32
-	Loginuid   uint32
-	Sessionid  uint32
-	Retval     int32
-	ArgsCount  int32
-	UpperLayer bool
-	_          [3]byte
-	ArgsSize   uint32
-	Comm       [16]uint8
-	Pcomm      [16]uint8
-	Cwd        [4096]uint8
-	ExePath    [4096]uint8
+	MntnsId     uint64
+	Timestamp   uint64
+	Pid         uint32
+	Ppid        uint32
+	Uid         uint32
+	Gid         uint32
+	Loginuid    uint32
+	Sessionid   uint32
+	Retval      int32
+	ArgsCount   int32
+	UpperLayer  bool
+	PupperLayer bool
+	_           [2]byte
+	ArgsSize    uint32
+	Comm        [16]uint8
+	Pcomm       [16]uint8
+	Cwd         [4096]uint8
+	Exepath     [4096]uint8
 }
 
 type Config struct {
@@ -86,10 +88,11 @@ type Tracer struct {
 	enricher      gadgets.DataEnricherByMntNs
 	eventCallback func(*types.Event)
 
-	objs      execsnoopObjects
-	enterLink link.Link
-	exitLink  link.Link
-	reader    *perf.Reader
+	objs          execsnoopObjects
+	enterLink     link.Link
+	schedExecLink link.Link
+	exitLink      link.Link
+	reader        *perf.Reader
 }
 
 func NewTracer(config *Config, enricher gadgets.DataEnricherByMntNs,
@@ -119,6 +122,7 @@ func (t *Tracer) Stop() {
 
 func (t *Tracer) close() {
 	t.enterLink = gadgets.CloseLink(t.enterLink)
+	t.schedExecLink = gadgets.CloseLink(t.schedExecLink)
 	t.exitLink = gadgets.CloseLink(t.exitLink)
 
 	if t.reader != nil {
@@ -154,6 +158,11 @@ func (t *Tracer) install() error {
 		return fmt.Errorf("attaching enter tracepoint: %w", err)
 	}
 
+	t.schedExecLink, err = link.Tracepoint("sched", "sched_process_exec", t.objs.IgSchedExec, nil)
+	if err != nil {
+		return fmt.Errorf("attaching sched_process_exec tracepoint: %w", err)
+	}
+
 	t.exitLink, err = link.Tracepoint("syscalls", "sys_exit_execve", t.objs.IgExecveX, nil)
 	if err != nil {
 		return fmt.Errorf("attaching exit tracepoint: %w", err)
@@ -164,6 +173,10 @@ func (t *Tracer) install() error {
 		return fmt.Errorf("creating perf ring buffer: %w", err)
 	}
 	t.reader = reader
+
+	if err := gadgets.FreezeMaps(t.objs.execsnoopMaps.Events); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -204,6 +217,7 @@ func (t *Tracer) run() {
 			LoginUid:      bpfEvent.Loginuid,
 			SessionId:     bpfEvent.Sessionid,
 			UpperLayer:    bpfEvent.UpperLayer,
+			PupperLayer:   bpfEvent.PupperLayer,
 			WithMountNsID: eventtypes.WithMountNsID{MountNsID: bpfEvent.MntnsId},
 			Retval:        int(bpfEvent.Retval),
 			Comm:          gadgets.FromCString(bpfEvent.Comm[:]),
@@ -217,7 +231,7 @@ func (t *Tracer) run() {
 		if t.config.GetPaths {
 			bpfEventWithLongPaths := (*execsnoopWithLongPathsEventAbbrev)(unsafe.Pointer(&record.RawSample[0]))
 			event.Cwd = gadgets.FromCString(bpfEventWithLongPaths.Cwd[:])
-			event.ExePath = gadgets.FromCString(bpfEventWithLongPaths.ExePath[:])
+			event.ExePath = gadgets.FromCString(bpfEventWithLongPaths.Exepath[:])
 			args = record.RawSample[unsafe.Offsetof(execsnoopWithLongPathsEvent{}.Args):]
 		}
 

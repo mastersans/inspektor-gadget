@@ -1,0 +1,29 @@
+# Artifact Hub package metadata file
+version: 0.33.0
+name: "trace sni"
+category: monitoring-logging
+displayName: "trace sni"
+createdAt: "2024-10-08T09:57:54Z"
+digest: "2024-10-08T09:57:54Z"
+description: "trace sni"
+logoURL: "https://inspektor-gadget.io/media/brand-icon.svg"
+license: ""
+homeURL: "https://inspektor-gadget.io/docs/latest/gadgets/trace_sni"
+containersImages:
+    - name: gadget
+      image: "ghcr.io/inspektor-gadget/gadget/trace_sni:latest"
+      platforms:
+        - linux/amd64
+        - linux/arm64
+keywords:
+    - gadget
+links:
+    - name: source
+      url: "https://github.com/inspektor-gadget/inspektor-gadget/tree/main/gadgets/trace_sni"
+install: |
+    # Run
+    ```bash
+    sudo ig run ghcr.io/inspektor-gadget/gadget/trace_sni:latest
+    ```
+provider:
+    name: Inspektor Gadget

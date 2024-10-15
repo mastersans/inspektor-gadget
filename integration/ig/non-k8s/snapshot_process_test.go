@@ -1,4 +1,4 @@
-// Copyright 2023 The Inspektor Gadget authors
+// Copyright 2023-2024 The Inspektor Gadget authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,6 +20,8 @@ import (
 
 	. "github.com/inspektor-gadget/inspektor-gadget/integration"
 	snapshotprocessTypes "github.com/inspektor-gadget/inspektor-gadget/pkg/gadgets/snapshot/process/types"
+	"github.com/inspektor-gadget/inspektor-gadget/pkg/testing/containers"
+	"github.com/inspektor-gadget/inspektor-gadget/pkg/testing/match"
 	eventtypes "github.com/inspektor-gadget/inspektor-gadget/pkg/types"
 )
 
@@ -51,17 +53,18 @@ func TestSnapshotProcess(t *testing.T) {
 				e.MountNsID = 0
 
 				e.Runtime.ContainerID = ""
+				e.Runtime.ContainerStartedAt = 0
 				// TODO: Handle once we support getting ContainerImageName from Docker
 				e.Runtime.ContainerImageName = ""
 				e.Runtime.ContainerImageDigest = ""
 			}
 
-			ExpectEntriesInArrayToMatch(t, output, normalize, expectedEntry)
+			match.MatchEntries(t, match.JSONSingleArrayMode, output, normalize, expectedEntry)
 		},
 	}
 
 	testSteps := []TestStep{
-		containerFactory.NewContainer(cn, "nc -l -p 9090", WithStartAndStop()),
+		containerFactory.NewContainer(cn, "nc -l -p 9090", containers.WithStartAndStop()),
 		snapshotProcessCmd,
 	}
 

@@ -1,4 +1,4 @@
-// Copyright 2019-2023 The Inspektor Gadget authors
+// Copyright 2019-2024 The Inspektor Gadget authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -35,6 +35,7 @@ func init() {
 	columns.MustRegisterTemplate("container", "width:30")
 	columns.MustRegisterTemplate("containerImageName", "width:30")
 	columns.MustRegisterTemplate("containerImageDigest", "width:30")
+	columns.MustRegisterTemplate("containerStartedAt", "width:35,hide")
 	columns.MustRegisterTemplate("comm", "maxWidth:16")
 	columns.MustRegisterTemplate("pid", "minWidth:7")
 	columns.MustRegisterTemplate("uid", "minWidth:8")
@@ -105,6 +106,13 @@ func String2RuntimeName(name string) RuntimeName {
 	return RuntimeNameUnknown
 }
 
+type Container interface {
+	K8sMetadata() *BasicK8sMetadata
+	RuntimeMetadata() *BasicRuntimeMetadata
+	UsesHostNetwork() bool
+	K8sOwnerReference() *K8sOwnerReference
+}
+
 type BasicRuntimeMetadata struct {
 	// RuntimeName is the name of the container runtime. It is useful to distinguish
 	// who is the "owner" of each container in a list of containers collected
@@ -132,6 +140,9 @@ type BasicRuntimeMetadata struct {
 	// containerd: events from both initial and new containers are enriched
 	// crio: events from initial containers are enriched
 	ContainerImageDigest string `json:"containerImageDigest,omitempty" column:"containerImageDigest,hide"`
+
+	// ContainerStartedAt is the unix timestamp at which the container was started at
+	ContainerStartedAt Time `json:"containerStartedAt,omitempty" column:"containerStartedAt,template:timestamp,stringer,hide"`
 }
 
 func (b *BasicRuntimeMetadata) IsEnriched() bool {
@@ -140,9 +151,14 @@ func (b *BasicRuntimeMetadata) IsEnriched() bool {
 
 type BasicK8sMetadata struct {
 	Namespace     string            `json:"namespace,omitempty" column:"namespace,template:namespace"`
-	PodName       string            `json:"podName,omitempty" column:"pod,template:pod"`
+	PodName       string            `json:"podName,omitempty" column:"podName,template:pod"`
 	PodLabels     map[string]string `json:"podLabels,omitempty" column:"labels,hide"`
-	ContainerName string            `json:"containerName,omitempty" column:"container,template:container"`
+	ContainerName string            `json:"containerName,omitempty" column:"containerName,template:container"`
+}
+
+type K8sOwnerReference struct {
+	Kind string `json:"kind,omitempty" column:"kind,hide"`
+	Name string `json:"name,omitempty" column:"name,hide"`
 }
 
 func (b *BasicK8sMetadata) IsEnriched() bool {
@@ -156,6 +172,8 @@ type K8sMetadata struct {
 
 	// HostNetwork is true if the container uses the host network namespace
 	HostNetwork bool `json:"hostNetwork,omitempty" column:"hostnetwork,hide"`
+
+	Owner K8sOwnerReference `json:"owner,omitempty" column:"owner,hide"`
 }
 
 type CommonData struct {
@@ -172,26 +190,35 @@ func (c *CommonData) SetNode(node string) {
 	c.K8s.Node = node
 }
 
-func (c *CommonData) SetPodMetadata(k8s *BasicK8sMetadata, runtime *BasicRuntimeMetadata) {
+func (c *CommonData) SetPodMetadata(container Container) {
+	k8s := container.K8sMetadata()
+	runtime := container.RuntimeMetadata()
+
 	c.K8s.PodName = k8s.PodName
 	c.K8s.Namespace = k8s.Namespace
 	c.K8s.PodLabels = k8s.PodLabels
+	c.K8s.Owner = *container.K8sOwnerReference()
 
 	// All containers in the same pod share the same container runtime
 	c.Runtime.RuntimeName = runtime.RuntimeName
 }
 
-func (c *CommonData) SetContainerMetadata(k8s *BasicK8sMetadata, runtime *BasicRuntimeMetadata) {
+func (c *CommonData) SetContainerMetadata(container Container) {
+	k8s := container.K8sMetadata()
+	runtime := container.RuntimeMetadata()
+
 	c.K8s.ContainerName = k8s.ContainerName
 	c.K8s.PodName = k8s.PodName
 	c.K8s.Namespace = k8s.Namespace
 	c.K8s.PodLabels = k8s.PodLabels
+	c.K8s.Owner = *container.K8sOwnerReference()
 
 	c.Runtime.RuntimeName = runtime.RuntimeName
 	c.Runtime.ContainerName = runtime.ContainerName
 	c.Runtime.ContainerID = runtime.ContainerID
 	c.Runtime.ContainerImageName = runtime.ContainerImageName
 	c.Runtime.ContainerImageDigest = runtime.ContainerImageDigest
+	c.Runtime.ContainerStartedAt = runtime.ContainerStartedAt
 }
 
 func (c *CommonData) GetNode() string {

@@ -1,4 +1,4 @@
-// Copyright 2023 The Inspektor Gadget authors
+// Copyright 2023-2024 The Inspektor Gadget authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 
 	"github.com/distribution/reference"
 	"github.com/opencontainers/image-spec/specs-go"
@@ -31,7 +32,7 @@ import (
 	"oras.land/oras-go/v2/content"
 	"oras.land/oras-go/v2/errdef"
 
-	"github.com/inspektor-gadget/inspektor-gadget/pkg/gadgets/run/types"
+	metadatav1 "github.com/inspektor-gadget/inspektor-gadget/pkg/metadata/v1"
 )
 
 const (
@@ -41,21 +42,30 @@ const (
 )
 
 const (
+	artifactType        = "application/vnd.gadget.v1+binary"
 	eBPFObjectMediaType = "application/vnd.gadget.ebpf.program.v1+binary"
 	wasmObjectMediaType = "application/vnd.gadget.wasm.program.v1+binary"
+	btfgenMediaType     = "application/vnd.gadget.btfgen.v1+binary"
 	metadataMediaType   = "application/vnd.gadget.config.v1+yaml"
 )
+
+type ObjectPath struct {
+	// Path to the EBPF object
+	EBPF string
+	// Optional path to the Wasm file
+	Wasm string
+	// Optional path to tarball containing BTF files generated with btfgen
+	Btfgen string
+}
 
 type BuildGadgetImageOpts struct {
 	// Source path of the eBPF program. Currently it's not used for compilation purposes
 	EBPFSourcePath string
 	// List of eBPF objects to include in the image. The key is the architecture and the value
-	// is the path to the eBPF object.
-	EBPFObjectPaths map[string]string
+	// are the paths to the objects.
+	ObjectPaths map[string]*ObjectPath
 	// Path to the metadata file.
 	MetadataPath string
-	// Optional path to the Wasm file
-	WasmObjectPath string
 	// If true, the metadata is updated to follow changes in the eBPF objects.
 	UpdateMetadata bool
 	// If true, the metadata is validated before creating the image.
@@ -68,7 +78,7 @@ type BuildGadgetImageOpts struct {
 // the "name:tag" format is used to name and tag the created image. If it's empty the image is not
 // named.
 func BuildGadgetImage(ctx context.Context, opts *BuildGadgetImageOpts, image string) (*GadgetImageDesc, error) {
-	ociStore, err := getLocalOciStore()
+	ociStore, err := GetLocalOciStore()
 	if err != nil {
 		return nil, fmt.Errorf("getting oci store: %w", err)
 	}
@@ -111,6 +121,10 @@ func BuildGadgetImage(ctx context.Context, opts *BuildGadgetImageOpts, image str
 		}
 	}
 
+	if err := fixGeneratedFilesOwner(opts); err != nil {
+		return nil, fmt.Errorf("fixing generated files owner: %w", err)
+	}
+
 	return imageDesc, nil
 }
 
@@ -138,7 +152,7 @@ func createLayerDesc(ctx context.Context, target oras.Target, progFilePath, medi
 }
 
 func annotationsFromMetadata(metadataBytes []byte) (map[string]string, error) {
-	metadata := &types.GadgetMetadata{}
+	metadata := &metadatav1.GadgetMetadata{}
 	if err := yaml.NewDecoder(bytes.NewReader(metadataBytes)).Decode(&metadata); err != nil {
 		return nil, fmt.Errorf("decoding metadata file: %w", err)
 	}
@@ -186,16 +200,31 @@ func createEmptyDesc(ctx context.Context, target oras.Target) (ocispec.Descripto
 	return emptyDesc, nil
 }
 
-func createManifestForTarget(ctx context.Context, target oras.Target, metadataFilePath, progFilePath, wasmFilePath, arch, createdDate string) (ocispec.Descriptor, error) {
-	progDesc, err := createLayerDesc(ctx, target, progFilePath, eBPFObjectMediaType)
+func createManifestForTarget(ctx context.Context, target oras.Target, metadataFilePath, arch string, paths *ObjectPath, createdDate string) (ocispec.Descriptor, error) {
+	layerDescs := []ocispec.Descriptor{}
+
+	progDesc, err := createLayerDesc(ctx, target, paths.EBPF, eBPFObjectMediaType)
 	if err != nil {
 		return ocispec.Descriptor{}, fmt.Errorf("creating and pushing eBPF descriptor: %w", err)
 	}
+	layerDescs = append(layerDescs, progDesc)
 
-	// artifactType must be only set when the config.mediaType is set to
-	// MediaTypeEmptyJSON. In our case, when the metadata file is not provided:
-	// https://github.com/opencontainers/image-spec/blob/f5f87016de46439ccf91b5381cf76faaae2bc28f/manifest.md?plain=1#L170
-	var artifactType string
+	if paths.Wasm != "" {
+		wasmDesc, err := createLayerDesc(ctx, target, paths.Wasm, wasmObjectMediaType)
+		if err != nil {
+			return ocispec.Descriptor{}, fmt.Errorf("creating and pushing wasm descriptor: %w", err)
+		}
+		layerDescs = append(layerDescs, wasmDesc)
+	}
+
+	if paths.Btfgen != "" {
+		btfDesc, err := createLayerDesc(ctx, target, paths.Btfgen, btfgenMediaType)
+		if err != nil {
+			return ocispec.Descriptor{}, fmt.Errorf("creating and pushing btfgen descriptor: %w", err)
+		}
+		layerDescs = append(layerDescs, btfDesc)
+	}
+
 	var defDesc ocispec.Descriptor
 
 	if _, err := os.Stat(metadataFilePath); err == nil {
@@ -211,7 +240,6 @@ func createManifestForTarget(ctx context.Context, target oras.Target, metadataFi
 		if err != nil {
 			return ocispec.Descriptor{}, fmt.Errorf("creating empty descriptor: %w", err)
 		}
-		artifactType = eBPFObjectMediaType
 
 		// Even without metadata, we can still set some annotations
 		defDesc.Annotations = map[string]string{
@@ -225,17 +253,9 @@ func createManifestForTarget(ctx context.Context, target oras.Target, metadataFi
 			SchemaVersion: 2, // historical value. does not pertain to OCI or docker version
 		},
 		Config:       defDesc,
-		Layers:       []ocispec.Descriptor{progDesc},
+		Layers:       layerDescs,
 		Annotations:  defDesc.Annotations,
 		ArtifactType: artifactType,
-	}
-
-	if wasmFilePath != "" {
-		wasmDesc, err := createLayerDesc(ctx, target, wasmFilePath, wasmObjectMediaType)
-		if err != nil {
-			return ocispec.Descriptor{}, fmt.Errorf("creating and pushing wasm descriptor: %w", err)
-		}
-		manifest.Layers = append(manifest.Layers, wasmDesc)
 	}
 
 	manifestJson, err := json.Marshal(manifest)
@@ -268,8 +288,17 @@ func createImageIndex(ctx context.Context, target oras.Target, o *BuildGadgetIma
 	// Read the eBPF program files and push them to the memory store
 	layers := []ocispec.Descriptor{}
 
-	for arch, path := range o.EBPFObjectPaths {
-		manifestDesc, err := createManifestForTarget(ctx, target, o.MetadataPath, path, o.WasmObjectPath, arch, o.CreatedDate)
+	archs := make([]string, 0, len(o.ObjectPaths))
+	for k := range o.ObjectPaths {
+		archs = append(archs, k)
+	}
+
+	// Sort the keys to ensure the order of the layers is deterministic
+	slices.Sort(archs)
+
+	for _, arch := range archs {
+		paths := o.ObjectPaths[arch]
+		manifestDesc, err := createManifestForTarget(ctx, target, o.MetadataPath, arch, paths, o.CreatedDate)
 		if err != nil {
 			return ocispec.Descriptor{}, fmt.Errorf("creating %s manifest: %w", arch, err)
 		}

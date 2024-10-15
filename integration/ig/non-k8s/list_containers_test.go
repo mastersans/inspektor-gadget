@@ -1,4 +1,4 @@
-// Copyright 2022-2023 The Inspektor Gadget authors
+// Copyright 2022-2024 The Inspektor Gadget authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,6 +20,8 @@ import (
 
 	. "github.com/inspektor-gadget/inspektor-gadget/integration"
 	containercollection "github.com/inspektor-gadget/inspektor-gadget/pkg/container-collection"
+	"github.com/inspektor-gadget/inspektor-gadget/pkg/testing/containers"
+	"github.com/inspektor-gadget/inspektor-gadget/pkg/testing/match"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/types"
 )
 
@@ -54,17 +56,18 @@ func TestFilterByContainerName(t *testing.T) {
 				c.K8s.PodLabels = nil
 				c.K8s.PodUID = ""
 				c.Runtime.ContainerID = ""
+				c.Runtime.ContainerStartedAt = 0
 				// TODO: Handle once we support getting ContainerImageName from Docker
 				c.Runtime.ContainerImageName = ""
 				c.Runtime.ContainerImageDigest = ""
 			}
 
-			ExpectAllInArrayToMatch(t, output, normalize, expectedContainer)
+			match.MatchAllEntries(t, match.JSONSingleArrayMode, output, normalize, expectedContainer)
 		},
 	}
 
 	testSteps := []TestStep{
-		containerFactory.NewContainer(cn, "sleep inf", WithStartAndStop()),
+		containerFactory.NewContainer(cn, "sleep inf", containers.WithStartAndStop()),
 		SleepForSecondsCommand(2),
 		listContainersCmd,
 	}
@@ -121,12 +124,13 @@ func TestWatchContainers(t *testing.T) {
 				e.Container.K8s.PodLabels = nil
 				e.Container.K8s.PodUID = ""
 				e.Container.Runtime.ContainerID = ""
+				e.Container.Runtime.ContainerStartedAt = 0
 				// TODO: Handle once we support getting ContainerImageName from Docker
 				e.Container.Runtime.ContainerImageName = ""
 				e.Container.Runtime.ContainerImageDigest = ""
 			}
 
-			ExpectEntriesToMatch(t, output, normalize, expectedEvents...)
+			match.MatchEntries(t, match.JSONMultiObjectMode, output, normalize, expectedEvents...)
 		},
 	}
 

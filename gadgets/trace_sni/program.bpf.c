@@ -56,17 +56,18 @@
 #define TASK_COMM_LEN 16
 
 struct event_t {
-	gadget_timestamp timestamp;
-
+	gadget_timestamp timestamp_raw;
 	gadget_mntns_id mntns_id;
-	__u32 netns;
+	gadget_netns_id netns_id;
 
+	char comm[TASK_COMM_LEN];
+	// user-space terminology for pid and tid
 	__u32 pid;
 	__u32 tid;
 	__u32 uid;
 	__u32 gid;
-	__u8 task[TASK_COMM_LEN];
-	__u8 name[TLS_MAX_SERVER_NAME_LEN];
+
+	char name[TLS_MAX_SERVER_NAME_LEN];
 };
 
 GADGET_TRACER_MAP(events, 1024 * 256);
@@ -220,13 +221,13 @@ int ig_trace_sni(struct __sk_buff *skb)
 		0,
 	};
 
-	event.netns = skb->cb[0]; // cb[0] initialized by dispatcher.bpf.c
+	event.netns_id = skb->cb[0]; // cb[0] initialized by dispatcher.bpf.c
 	for (int i = 0; i < TLS_MAX_SERVER_NAME_LEN; i++) {
 		if (sni[i] == '\0')
 			break;
 		event.name[i] = sni[i];
 	}
-	event.timestamp = bpf_ktime_get_boot_ns();
+	event.timestamp_raw = bpf_ktime_get_boot_ns();
 
 	// Enrich event with process metadata
 	struct sockets_value *skb_val = gadget_socket_lookup(skb);
@@ -234,8 +235,8 @@ int ig_trace_sni(struct __sk_buff *skb)
 		event.mntns_id = skb_val->mntns;
 		event.pid = skb_val->pid_tgid >> 32;
 		event.tid = (__u32)skb_val->pid_tgid;
-		__builtin_memcpy(&event.task, skb_val->task,
-				 sizeof(event.task));
+		__builtin_memcpy(&event.comm, skb_val->task,
+				 sizeof(event.comm));
 		event.uid = (__u32)skb_val->uid_gid;
 		event.gid = (__u32)(skb_val->uid_gid >> 32);
 	}

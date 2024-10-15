@@ -24,6 +24,9 @@ const stepWaitDuration = 10 * time.Second
 // TestStep allows combining different steps (e.g command, container creation)
 // to allow simplified/consistent flow for tests via RunTestSteps
 type TestStep interface {
+	// DisplayName returns a short descriptive name for the step.
+	DisplayName() string
+
 	// Run runs the step and wait its completion.
 	Run(t *testing.T)
 
@@ -61,7 +64,7 @@ func WithCbBeforeCleanup(f func(t *testing.T)) func(opts *runTestStepsOpts) {
 // RunTestSteps is used to run a list of test steps with stopping/clean up logic.
 // executeBeforeCleanup is executed before calling the cleanup functions, it can be use for instance
 // to print extra logs when the test fails.
-func RunTestSteps[S TestStep](steps []S, t *testing.T, options ...Option) {
+func RunTestSteps(steps []TestStep, t *testing.T, options ...Option) {
 	opts := &runTestStepsOpts{}
 
 	for _, option := range options {
@@ -89,6 +92,7 @@ func RunTestSteps[S TestStep](steps []S, t *testing.T, options ...Option) {
 			if step.IsStartAndStop() && step.Running() {
 				// Wait a bit before stopping the step.
 				time.Sleep(stepWaitDuration)
+				t.Logf("[%s] Stopping %q\n", time.Now().UTC(), step.DisplayName())
 				step.Stop(t)
 			}
 		}()
@@ -100,11 +104,13 @@ func RunTestSteps[S TestStep](steps []S, t *testing.T, options ...Option) {
 			continue
 		}
 
+		t.Logf("[%s] Starting %q\n", time.Now().UTC(), step.DisplayName())
 		if step.IsStartAndStop() {
 			step.Start(t)
 			continue
 		}
 
 		step.Run(t)
+		t.Logf("[%s] Stopped %q\n", time.Now().UTC(), step.DisplayName())
 	}
 }

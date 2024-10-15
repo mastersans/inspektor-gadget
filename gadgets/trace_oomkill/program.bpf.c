@@ -14,15 +14,15 @@
 #define TASK_COMM_LEN 16
 
 struct event {
+	gadget_timestamp timestamp_raw;
+	gadget_mntns_id mntns_id;
 	__u32 fpid;
 	__u32 fuid;
 	__u32 fgid;
 	__u32 tpid;
 	__u64 pages;
-	gadget_mntns_id mntns_id;
-	gadget_timestamp timestamp;
-	__u8 fcomm[TASK_COMM_LEN];
-	__u8 tcomm[TASK_COMM_LEN];
+	char fcomm[TASK_COMM_LEN];
+	char tcomm[TASK_COMM_LEN];
 };
 
 GADGET_TRACER_MAP(events, 1024 * 256);
@@ -54,7 +54,7 @@ int BPF_KPROBE(ig_oom_kill, struct oom_control *oc, const char *message)
 	bpf_probe_read_kernel(&event->tcomm, sizeof(event->tcomm),
 			      BPF_CORE_READ(oc, chosen, comm));
 	event->mntns_id = mntns_id;
-	event->timestamp = bpf_ktime_get_boot_ns();
+	event->timestamp_raw = bpf_ktime_get_boot_ns();
 	gadget_submit_buf(ctx, &events, event, sizeof(*event));
 
 	return 0;

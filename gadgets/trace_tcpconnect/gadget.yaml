@@ -1,42 +1,52 @@
-name: tcpconnect
+name: trace tcpconnect
 description: trace tcp connections
-tracers:
+homepageURL: https://inspektor-gadget.io/
+documentationURL: https://www.inspektor-gadget.io/docs/latest/gadgets/trace_tcpconnect
+sourceURL: https://github.com/inspektor-gadget/inspektor-gadget/tree/main/gadgets/trace_tcpconnect
+datasources:
   tcpconnect:
-    mapName: events
-    structName: event
-structs:
-  event:
     fields:
-    - name: timestamp
-      attributes:
-        template: timestamp
-    - name: pid
-      attributes:
-        template: pid
-    - name: task
-      attributes:
-        template: comm
-    - name: uid
-      attributes:
-        template: uid
-    - name: gid
-      attributes:
-        template: uid
-    - name: src
-      attributes:
-        minWidth: 24
-        maxWidth: 50
-    - name: dst
-      attributes:
-        minWidth: 24
-        maxWidth: 50
-    - name: latency
-      description: 'TODO: Fill field description'
-      attributes:
-        width: 16
-        alignment: left
-        hidden: true
-    - name: mntns_id
-      description: 'Mount namespace inode id'
-      attributes:
-        template: ns
+      timestamp_raw:
+        annotations:
+          columns.hidden: true
+      timestamp:
+        annotations:
+          template: timestamp
+      mntns_id:
+        annotations:
+          description: Mount namespace inode id
+          template: ns
+      comm:
+        annotations:
+          description: Process name
+          template: comm
+      pid:
+        annotations:
+          description: Process ID
+          template: pid
+      tid:
+        annotations:
+          description: Thread ID
+          template: pid
+      uid:
+        annotations:
+          description: User ID
+          template: uid
+      gid:
+        annotations:
+          description: Group ID
+          template: uid
+      src:
+        annotations:
+          template: l4endpoint
+      dst:
+        annotations:
+          template: l4endpoint
+      latency:
+        annotations:
+          columns.width: 16
+          columns.alignment: right
+          columns.hidden: true
+      error_raw:
+        annotations:
+          columns.hidden: true

@@ -16,8 +16,6 @@ package image
 
 import (
 	"github.com/spf13/cobra"
-
-	"github.com/inspektor-gadget/inspektor-gadget/cmd/common/utils"
 )
 
 func NewImageCmd() *cobra.Command {
@@ -27,11 +25,14 @@ func NewImageCmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(NewBuildCmd())
+	cmd.AddCommand(NewExportCmd())
+	cmd.AddCommand(NewImportCmd())
 	cmd.AddCommand(NewPushCmd())
 	cmd.AddCommand(NewPullCmd())
 	cmd.AddCommand(NewTagCmd())
 	cmd.AddCommand(NewListCmd())
+	cmd.AddCommand(NewInspectCmd())
 	cmd.AddCommand(NewRemoveCmd())
 
-	return utils.MarkExperimental(cmd)
+	return cmd
 }

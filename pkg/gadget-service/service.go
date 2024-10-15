@@ -1,4 +1,4 @@
-// Copyright 2023 The Inspektor Gadget authors
+// Copyright 2023-2024 The Inspektor Gadget authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -29,13 +30,18 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
 
+	"github.com/inspektor-gadget/inspektor-gadget/internal/version"
+	"github.com/inspektor-gadget/inspektor-gadget/pkg/config"
 	gadgetcontext "github.com/inspektor-gadget/inspektor-gadget/pkg/gadget-context"
 	gadgetregistry "github.com/inspektor-gadget/inspektor-gadget/pkg/gadget-registry"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/gadget-service/api"
+	apihelpers "github.com/inspektor-gadget/inspektor-gadget/pkg/gadget-service/api-helpers"
+	instancemanager "github.com/inspektor-gadget/inspektor-gadget/pkg/gadget-service/instance-manager"
+	"github.com/inspektor-gadget/inspektor-gadget/pkg/gadget-service/store"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/gadgets"
-	runTypes "github.com/inspektor-gadget/inspektor-gadget/pkg/gadgets/run/types"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/logger"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/operators"
+	"github.com/inspektor-gadget/inspektor-gadget/pkg/params"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/runtime"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/runtime/local"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/utils/experimental"
@@ -55,20 +61,44 @@ type RunConfig struct {
 }
 
 type Service struct {
+	api.UnimplementedBuiltInGadgetManagerServer
 	api.UnimplementedGadgetManagerServer
+	api.UnimplementedGadgetInstanceManagerServer
+	instanceMgr       *instancemanager.Manager
+	store             store.Store
 	listener          net.Listener
 	runtime           runtime.Runtime
 	logger            logger.Logger
 	servers           map[*grpc.Server]struct{}
 	eventBufferLength uint64
+
+	// operators stores all global parameters for DataOperators (non-legacy)
+	operators map[operators.DataOperator]*params.Params
 }
 
-func NewService(defaultLogger logger.Logger, length uint64) *Service {
-	return &Service{
-		servers:           map[*grpc.Server]struct{}{},
-		logger:            defaultLogger,
-		eventBufferLength: length,
+func NewService(defaultLogger logger.Logger) *Service {
+	ops := make(map[operators.DataOperator]*params.Params)
+	for _, op := range operators.GetDataOperators() {
+		ops[op] = apihelpers.ToParamDescs(op.GlobalParams()).ToParams()
 	}
+	return &Service{
+		servers:   map[*grpc.Server]struct{}{},
+		logger:    defaultLogger,
+		operators: ops,
+	}
+}
+
+func (s *Service) SetEventBufferLength(val uint64) {
+	s.eventBufferLength = val
+}
+
+func (s *Service) SetInstanceManager(mgr *instancemanager.Manager) {
+	s.instanceMgr = mgr
+	mgr.Service = s
+}
+
+func (s *Service) SetStore(store store.Store) {
+	s.store = store
 }
 
 func (s *Service) GetInfo(ctx context.Context, request *api.InfoRequest) (*api.InfoResponse, error) {
@@ -82,37 +112,14 @@ func (s *Service) GetInfo(ctx context.Context, request *api.InfoRequest) (*api.I
 		return nil, fmt.Errorf("marshal catalog: %w", err)
 	}
 	return &api.InfoResponse{
-		Version:      "1.0", // TODO
-		Catalog:      catalogJSON,
-		Experimental: experimental.Enabled(),
+		Version:       "1.0", // TODO
+		Catalog:       catalogJSON,
+		Experimental:  experimental.Enabled(),
+		ServerVersion: version.Version().String(),
 	}, nil
 }
 
-func (s *Service) GetGadgetInfo(ctx context.Context, req *api.GetGadgetInfoRequest) (*api.GetGadgetInfoResponse, error) {
-	gadgetDesc := gadgetregistry.Get(gadgets.CategoryNone, "run")
-	if gadgetDesc == nil {
-		return nil, errors.New("run gadget not found")
-	}
-
-	params := gadgetDesc.ParamDescs().ToParams()
-	params.CopyFromMap(req.Params, "")
-
-	ret, err := s.runtime.GetGadgetInfo(ctx, gadgetDesc, params, req.Args)
-	if err != nil {
-		return nil, fmt.Errorf("getting gadget info: %w", err)
-	}
-
-	retJSON, err := json.Marshal(ret)
-	if err != nil {
-		return nil, fmt.Errorf("marshal gadget info response: %w", err)
-	}
-
-	return &api.GetGadgetInfoResponse{
-		Info: retJSON,
-	}, nil
-}
-
-func (s *Service) RunGadget(runGadget api.GadgetManager_RunGadgetServer) error {
+func (s *Service) RunBuiltInGadget(runGadget api.BuiltInGadgetManager_RunBuiltInGadgetServer) error {
 	ctrl, err := runGadget.Recv()
 	if err != nil {
 		return err
@@ -120,7 +127,7 @@ func (s *Service) RunGadget(runGadget api.GadgetManager_RunGadgetServer) error {
 
 	request := ctrl.GetRunRequest()
 	if request == nil {
-		return fmt.Errorf("expected first control message to be gadget request")
+		return fmt.Errorf("expected first control message to be gadget run request")
 	}
 
 	// Create a new logger that logs to gRPC and falls back to the standard logger when it failed to send the message
@@ -159,35 +166,6 @@ func (s *Service) RunGadget(runGadget api.GadgetManager_RunGadgetServer) error {
 	err = gadgets.ParamsFromMap(request.Params, gadgetParams, runtimeParams, operatorParams)
 	if err != nil {
 		return fmt.Errorf("setting parameters: %w", err)
-	}
-
-	var gadgetInfo *runTypes.GadgetInfo
-
-	if c, ok := gadgetDesc.(runTypes.RunGadgetDesc); ok {
-		gadgetInfo, err = s.runtime.GetGadgetInfo(runGadget.Context(), gadgetDesc, gadgetParams, request.Args)
-		if err != nil {
-			return fmt.Errorf("getting gadget info: %w", err)
-		}
-		parser, err = c.CustomParser(gadgetInfo)
-		if err != nil {
-			return fmt.Errorf("calling custom parser: %w", err)
-		}
-
-		// Update gadget parameters to take type-specific params into consideration
-		gType = gadgetInfo.GadgetType
-		gadgetParamDescs.Add(gadgets.GadgetParams(gadgetDesc, gType, parser)...)
-
-		// Update gadget parameters to take ebpf params into consideration
-		for _, p := range gadgetInfo.GadgetMetadata.EBPFParams {
-			p := p
-			gadgetParamDescs.Add(&p.ParamDesc)
-		}
-
-		gadgetParams = gadgetParamDescs.ToParams()
-		err = gadgetParams.CopyFromMap(request.Params, "")
-		if err != nil {
-			return fmt.Errorf("setting parameters: %w", err)
-		}
 	}
 
 	// Create payload buffer
@@ -254,7 +232,7 @@ func (s *Service) RunGadget(runGadget api.GadgetManager_RunGadgetServer) error {
 	}
 
 	// Create new Gadget Context
-	gadgetCtx := gadgetcontext.New(
+	gadgetCtx := gadgetcontext.NewBuiltIn(
 		runGadget.Context(),
 		runID,
 		runtime,
@@ -266,7 +244,6 @@ func (s *Service) RunGadget(runGadget api.GadgetManager_RunGadgetServer) error {
 		parser,
 		logger,
 		time.Duration(request.Timeout),
-		gadgetInfo,
 	)
 	defer gadgetCtx.Cancel()
 
@@ -282,7 +259,7 @@ func (s *Service) RunGadget(runGadget api.GadgetManager_RunGadgetServer) error {
 				return
 			}
 			switch msg.Event.(type) {
-			case *api.GadgetControlRequest_StopRequest:
+			case *api.BuiltInGadgetControlRequest_StopRequest:
 				gadgetCtx.Cancel()
 				return
 			default:
@@ -292,7 +269,7 @@ func (s *Service) RunGadget(runGadget api.GadgetManager_RunGadgetServer) error {
 	}()
 
 	// Hand over to runtime
-	results, err := runtime.RunGadget(gadgetCtx)
+	results, err := runtime.RunBuiltInGadget(gadgetCtx)
 	if err != nil {
 		return fmt.Errorf("running gadget: %w", err)
 	}
@@ -350,6 +327,30 @@ func (s *Service) Run(runConfig RunConfig, serverOptions ...grpc.ServerOption) e
 	s.runtime = local.New()
 	defer s.runtime.Close()
 
+	// Set the global parameters for all operators using config file
+	for op, p := range s.operators {
+		for pk := range p.ParamMap() {
+			ck := config.OperatorKey + "." + op.Name() + "." + pk
+			if config.Config.IsSet(ck) {
+				var value string
+
+				v := config.Config.Get(ck)
+				switch v.(type) {
+				default:
+					value = config.Config.GetString(ck)
+				case []interface{}:
+					slice := config.Config.GetStringSlice(ck)
+					value = strings.Join(slice, ",")
+				}
+
+				err := p.Set(pk, value)
+				if err != nil {
+					return fmt.Errorf("setting operator parameter %s: %w", ck, err)
+				}
+			}
+		}
+	}
+
 	// Use defaults for now - this will become more important when we fan-out requests also to other
 	//  gRPC runtimes
 	err := s.runtime.Init(s.runtime.GlobalParamDescs().ToParams())
@@ -375,9 +376,26 @@ func (s *Service) Run(runConfig RunConfig, serverOptions ...grpc.ServerOption) e
 	}
 
 	server := grpc.NewServer(serverOptions...)
+	api.RegisterBuiltInGadgetManagerServer(server, s)
 	api.RegisterGadgetManagerServer(server, s)
 
+	if s.store != nil {
+		api.RegisterGadgetInstanceManagerServer(server, s)
+	}
+
 	s.servers[server] = struct{}{}
+
+	err = s.initOperators()
+	if err != nil {
+		return fmt.Errorf("initializing operators: %w", err)
+	}
+
+	if s.store != nil {
+		err = s.store.ResumeStoredGadgets()
+		if err != nil {
+			return fmt.Errorf("loading stored gadgets: %w", err)
+		}
+	}
 
 	return server.Serve(s.listener)
 }

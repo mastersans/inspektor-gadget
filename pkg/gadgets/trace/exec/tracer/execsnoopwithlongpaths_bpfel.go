@@ -15,24 +15,25 @@ import (
 type execsnoopWithLongPathsBufT struct{ Buf [32768]uint8 }
 
 type execsnoopWithLongPathsEvent struct {
-	MntnsId    uint64
-	Timestamp  uint64
-	Pid        uint32
-	Ppid       uint32
-	Uid        uint32
-	Gid        uint32
-	Loginuid   uint32
-	Sessionid  uint32
-	Retval     int32
-	ArgsCount  int32
-	UpperLayer bool
-	_          [3]byte
-	ArgsSize   uint32
-	Comm       [16]uint8
-	Pcomm      [16]uint8
-	Cwd        [4096]uint8
-	Exepath    [4096]uint8
-	Args       [7680]uint8
+	MntnsId     uint64
+	Timestamp   uint64
+	Pid         uint32
+	Ppid        uint32
+	Uid         uint32
+	Gid         uint32
+	Loginuid    uint32
+	Sessionid   uint32
+	Retval      int32
+	ArgsCount   int32
+	UpperLayer  bool
+	PupperLayer bool
+	_           [2]byte
+	ArgsSize    uint32
+	Comm        [16]uint8
+	Pcomm       [16]uint8
+	Cwd         [4096]uint8
+	Exepath     [4096]uint8
+	Args        [7680]uint8
 }
 
 // loadExecsnoopWithLongPaths returns the embedded CollectionSpec for execsnoopWithLongPaths.
@@ -76,8 +77,9 @@ type execsnoopWithLongPathsSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type execsnoopWithLongPathsProgramSpecs struct {
-	IgExecveE *ebpf.ProgramSpec `ebpf:"ig_execve_e"`
-	IgExecveX *ebpf.ProgramSpec `ebpf:"ig_execve_x"`
+	IgExecveE   *ebpf.ProgramSpec `ebpf:"ig_execve_e"`
+	IgExecveX   *ebpf.ProgramSpec `ebpf:"ig_execve_x"`
+	IgSchedExec *ebpf.ProgramSpec `ebpf:"ig_sched_exec"`
 }
 
 // execsnoopWithLongPathsMapSpecs contains maps before they are loaded into the kernel.
@@ -88,7 +90,6 @@ type execsnoopWithLongPathsMapSpecs struct {
 	Events               *ebpf.MapSpec `ebpf:"events"`
 	Execs                *ebpf.MapSpec `ebpf:"execs"`
 	GadgetMntnsFilterMap *ebpf.MapSpec `ebpf:"gadget_mntns_filter_map"`
-	PidByTgid            *ebpf.MapSpec `ebpf:"pid_by_tgid"`
 }
 
 // execsnoopWithLongPathsObjects contains all objects after they have been loaded into the kernel.
@@ -114,7 +115,6 @@ type execsnoopWithLongPathsMaps struct {
 	Events               *ebpf.Map `ebpf:"events"`
 	Execs                *ebpf.Map `ebpf:"execs"`
 	GadgetMntnsFilterMap *ebpf.Map `ebpf:"gadget_mntns_filter_map"`
-	PidByTgid            *ebpf.Map `ebpf:"pid_by_tgid"`
 }
 
 func (m *execsnoopWithLongPathsMaps) Close() error {
@@ -123,7 +123,6 @@ func (m *execsnoopWithLongPathsMaps) Close() error {
 		m.Events,
 		m.Execs,
 		m.GadgetMntnsFilterMap,
-		m.PidByTgid,
 	)
 }
 
@@ -131,14 +130,16 @@ func (m *execsnoopWithLongPathsMaps) Close() error {
 //
 // It can be passed to loadExecsnoopWithLongPathsObjects or ebpf.CollectionSpec.LoadAndAssign.
 type execsnoopWithLongPathsPrograms struct {
-	IgExecveE *ebpf.Program `ebpf:"ig_execve_e"`
-	IgExecveX *ebpf.Program `ebpf:"ig_execve_x"`
+	IgExecveE   *ebpf.Program `ebpf:"ig_execve_e"`
+	IgExecveX   *ebpf.Program `ebpf:"ig_execve_x"`
+	IgSchedExec *ebpf.Program `ebpf:"ig_sched_exec"`
 }
 
 func (p *execsnoopWithLongPathsPrograms) Close() error {
 	return _ExecsnoopWithLongPathsClose(
 		p.IgExecveE,
 		p.IgExecveX,
+		p.IgSchedExec,
 	)
 }
 

@@ -60,10 +60,11 @@ type execruntimeSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type execruntimeProgramSpecs struct {
-	IgExecveE *ebpf.ProgramSpec `ebpf:"ig_execve_e"`
-	IgExecveX *ebpf.ProgramSpec `ebpf:"ig_execve_x"`
-	IgFaPickE *ebpf.ProgramSpec `ebpf:"ig_fa_pick_e"`
-	IgFaPickX *ebpf.ProgramSpec `ebpf:"ig_fa_pick_x"`
+	IgExecveE   *ebpf.ProgramSpec `ebpf:"ig_execve_e"`
+	IgExecveX   *ebpf.ProgramSpec `ebpf:"ig_execve_x"`
+	IgFaPickE   *ebpf.ProgramSpec `ebpf:"ig_fa_pick_e"`
+	IgFaPickX   *ebpf.ProgramSpec `ebpf:"ig_fa_pick_x"`
+	IgSchedExec *ebpf.ProgramSpec `ebpf:"ig_sched_exec"`
 }
 
 // execruntimeMapSpecs contains maps before they are loaded into the kernel.
@@ -111,10 +112,11 @@ func (m *execruntimeMaps) Close() error {
 //
 // It can be passed to loadExecruntimeObjects or ebpf.CollectionSpec.LoadAndAssign.
 type execruntimePrograms struct {
-	IgExecveE *ebpf.Program `ebpf:"ig_execve_e"`
-	IgExecveX *ebpf.Program `ebpf:"ig_execve_x"`
-	IgFaPickE *ebpf.Program `ebpf:"ig_fa_pick_e"`
-	IgFaPickX *ebpf.Program `ebpf:"ig_fa_pick_x"`
+	IgExecveE   *ebpf.Program `ebpf:"ig_execve_e"`
+	IgExecveX   *ebpf.Program `ebpf:"ig_execve_x"`
+	IgFaPickE   *ebpf.Program `ebpf:"ig_fa_pick_e"`
+	IgFaPickX   *ebpf.Program `ebpf:"ig_fa_pick_x"`
+	IgSchedExec *ebpf.Program `ebpf:"ig_sched_exec"`
 }
 
 func (p *execruntimePrograms) Close() error {
@@ -123,6 +125,7 @@ func (p *execruntimePrograms) Close() error {
 		p.IgExecveX,
 		p.IgFaPickE,
 		p.IgFaPickX,
+		p.IgSchedExec,
 	)
 }
 

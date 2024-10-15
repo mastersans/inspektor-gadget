@@ -19,11 +19,13 @@ import (
 	"strings"
 
 	"github.com/containerd/containerd/pkg/cri/constants"
+	securejoin "github.com/cyphar/filepath-securejoin"
 
 	commonutils "github.com/inspektor-gadget/inspektor-gadget/cmd/common/utils"
 	containerutils "github.com/inspektor-gadget/inspektor-gadget/pkg/container-utils"
 	containerutilsTypes "github.com/inspektor-gadget/inspektor-gadget/pkg/container-utils/types"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/types"
+	"github.com/inspektor-gadget/inspektor-gadget/pkg/utils/host"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -40,7 +42,7 @@ type CommonFlags struct {
 	// Containername allows to filter containers by name.
 	Containername string
 
-	// The name of the container runtimes to be used separated by comma.
+	// Comma-separated list of container runtimes.
 	Runtimes string
 
 	// Host, when set to true, specifies to include all events both from
@@ -82,20 +84,25 @@ func AddCommonFlags(command *cobra.Command, commonFlags *CommonFlags) {
 			runtimeName := types.String2RuntimeName(strings.TrimSpace(p))
 			socketPath := ""
 			namespace := ""
+			var err error
 
 			switch runtimeName {
 			case types.RuntimeNameDocker:
-				socketPath = commonFlags.RuntimesSocketPathConfig.Docker
+				socketPath, err = securejoin.SecureJoin(host.HostRoot, commonFlags.RuntimesSocketPathConfig.Docker)
 			case types.RuntimeNameContainerd:
-				socketPath = commonFlags.RuntimesSocketPathConfig.Containerd
+				socketPath, err = securejoin.SecureJoin(host.HostRoot, commonFlags.RuntimesSocketPathConfig.Containerd)
 				namespace = commonFlags.ContainerdNamespace
 			case types.RuntimeNameCrio:
-				socketPath = commonFlags.RuntimesSocketPathConfig.Crio
+				socketPath, err = securejoin.SecureJoin(host.HostRoot, commonFlags.RuntimesSocketPathConfig.Crio)
 			case types.RuntimeNamePodman:
-				socketPath = commonFlags.RuntimesSocketPathConfig.Podman
+				socketPath, err = securejoin.SecureJoin(host.HostRoot, commonFlags.RuntimesSocketPathConfig.Podman)
 			default:
 				return commonutils.WrapInErrInvalidArg("--runtime / -r",
 					fmt.Errorf("runtime %q is not supported", p))
+			}
+
+			if err != nil {
+				return fmt.Errorf("securejoining %v to %v socket path: %w", host.HostRoot, runtimeName, err)
 			}
 
 			for _, r := range commonFlags.RuntimeConfigs {
@@ -151,7 +158,7 @@ func AddCommonFlags(command *cobra.Command, commonFlags *CommonFlags) {
 		&commonFlags.Runtimes,
 		"runtimes", "r",
 		strings.Join(containerutils.AvailableRuntimes, ","),
-		fmt.Sprintf("Container runtimes to be used separated by comma. Supported values are: %s",
+		fmt.Sprintf("Comma-separated list of container runtimes. Supported values are: %s",
 			strings.Join(containerutils.AvailableRuntimes, ", ")),
 	)
 

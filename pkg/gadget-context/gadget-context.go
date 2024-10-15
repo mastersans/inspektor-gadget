@@ -1,4 +1,4 @@
-// Copyright 2022-2023 The Inspektor Gadget authors
+// Copyright 2022-2024 The Inspektor Gadget authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,11 +19,21 @@ handing them over to a specified runtime.
 package gadgetcontext
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
+	"fmt"
+	"maps"
+	"slices"
+	"sync"
 	"time"
 
+	"github.com/spf13/viper"
+	"oras.land/oras-go/v2"
+
+	"github.com/inspektor-gadget/inspektor-gadget/pkg/datasource"
+	"github.com/inspektor-gadget/inspektor-gadget/pkg/gadget-service/api"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/gadgets"
-	runTypes "github.com/inspektor-gadget/inspektor-gadget/pkg/gadgets/run/types"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/logger"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/operators"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/params"
@@ -49,10 +59,23 @@ type GadgetContext struct {
 	result                   []byte
 	resultError              error
 	timeout                  time.Duration
-	gadgetInfo               *runTypes.GadgetInfo
+
+	// useInstance, if set, will try to work with existing gadget instances on the server
+	useInstance bool
+
+	lock             sync.Mutex
+	dataSources      map[string]datasource.DataSource
+	dataOperators    []operators.DataOperator
+	vars             map[string]any
+	params           []*api.Param
+	prepareCallbacks []func()
+	loaded           bool
+	imageName        string
+	metadata         []byte
+	orasTarget       oras.ReadOnlyTarget
 }
 
-func New(
+func NewBuiltIn(
 	ctx context.Context,
 	id string,
 	runtime runtime.Runtime,
@@ -64,7 +87,6 @@ func New(
 	parser parser.Parser,
 	logger logger.Logger,
 	timeout time.Duration,
-	gadgetInfo *runTypes.GadgetInfo,
 ) *GadgetContext {
 	gCtx, cancel := context.WithCancel(ctx)
 
@@ -82,8 +104,33 @@ func New(
 		operators:                operators.GetOperatorsForGadget(gadget),
 		operatorsParamCollection: operatorsParamCollection,
 		timeout:                  timeout,
-		gadgetInfo:               gadgetInfo,
+
+		dataSources: make(map[string]datasource.DataSource),
+		vars:        make(map[string]any),
 	}
+}
+
+func New(
+	ctx context.Context,
+	imageName string,
+	options ...Option,
+) *GadgetContext {
+	gCtx, cancel := context.WithCancel(ctx)
+	gadgetContext := &GadgetContext{
+		ctx:    gCtx,
+		cancel: cancel,
+		args:   []string{},
+		logger: logger.DefaultLogger(),
+
+		imageName:   imageName,
+		dataSources: make(map[string]datasource.DataSource),
+		vars:        make(map[string]any),
+		// dataOperators: operators.GetDataOperators(),
+	}
+	for _, option := range options {
+		option(gadgetContext)
+	}
+	return gadgetContext
 }
 
 func (c *GadgetContext) ID() string {
@@ -138,8 +185,197 @@ func (c *GadgetContext) Timeout() time.Duration {
 	return c.timeout
 }
 
-func (c *GadgetContext) GadgetInfo() *runTypes.GadgetInfo {
-	return c.gadgetInfo
+func (c *GadgetContext) ImageName() string {
+	return c.imageName
+}
+
+func (c *GadgetContext) DataOperators() []operators.DataOperator {
+	return slices.Clone(c.dataOperators)
+}
+
+func (c *GadgetContext) IsRemoteCall() bool {
+	val := c.ctx.Value(remoteKey)
+	if val == nil {
+		return false
+	}
+	bVal, ok := val.(bool)
+	if !ok {
+		c.logger.Errorf("invalid type of variable %s on context, expected bool, got %T", remoteKey, val)
+		return false
+	}
+	return bVal
+}
+
+func (c *GadgetContext) UseInstance() bool {
+	return c.useInstance
+}
+
+func (c *GadgetContext) RegisterDataSource(t datasource.Type, name string) (datasource.DataSource, error) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	options := make([]datasource.DataSourceOption, 0)
+	if cfg, ok := c.GetVar("config"); ok {
+		if v, ok := cfg.(*viper.Viper); ok {
+			sub := v.Sub("datasources." + name)
+			if sub != nil {
+				options = append(options, datasource.WithConfig(sub))
+			}
+		}
+	}
+
+	ds, err := datasource.New(t, name, options...)
+	if err != nil {
+		return nil, fmt.Errorf("creating DataSource: %w", err)
+	}
+
+	c.dataSources[name] = ds
+	return ds, nil
+}
+
+func (c *GadgetContext) getDataSources(all bool) map[string]datasource.DataSource {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	ret := maps.Clone(c.dataSources)
+	for name, ds := range ret {
+		// Don't forward unrequested data sources if all is false
+		if !all && !ds.IsRequested() {
+			delete(ret, name)
+		}
+	}
+	return ret
+}
+
+func (c *GadgetContext) GetDataSources() map[string]datasource.DataSource {
+	return c.getDataSources(false)
+}
+
+func (c *GadgetContext) GetAllDataSources() map[string]datasource.DataSource {
+	return c.getDataSources(true)
+}
+
+func (c *GadgetContext) SetVar(varName string, value any) {
+	c.vars[varName] = value
+}
+
+func (c *GadgetContext) GetVar(varName string) (any, bool) {
+	res, ok := c.vars[varName]
+	return res, ok
+}
+
+func (c *GadgetContext) GetVars() map[string]any {
+	return maps.Clone(c.vars)
+}
+
+func (c *GadgetContext) Params() []*api.Param {
+	return slices.Clone(c.params)
+}
+
+func (c *GadgetContext) SetParams(params []*api.Param) {
+	for _, p := range params {
+		c.params = append(c.params, p)
+	}
+}
+
+func (c *GadgetContext) SetMetadata(m []byte) {
+	c.metadata = m
+}
+
+func (c *GadgetContext) SerializeGadgetInfo() (*api.GadgetInfo, error) {
+	gi := &api.GadgetInfo{
+		Name:      "",
+		Id:        c.id,
+		ImageName: c.ImageName(),
+		Metadata:  c.metadata,
+		Params:    c.params,
+	}
+
+	for _, ds := range c.GetDataSources() {
+		di := &api.DataSource{
+			Id:          0,
+			Type:        uint32(ds.Type()),
+			Name:        ds.Name(),
+			Fields:      ds.Fields(),
+			Tags:        ds.Tags(),
+			Annotations: ds.Annotations(),
+		}
+		if ds.ByteOrder() == binary.BigEndian {
+			di.Flags |= api.DataSourceFlagsBigEndian
+		}
+		gi.DataSources = append(gi.DataSources, di)
+	}
+
+	return gi, nil
+}
+
+func (c *GadgetContext) LoadGadgetInfo(info *api.GadgetInfo, paramValues api.ParamValues, run bool) error {
+	c.lock.Lock()
+	if c.loaded {
+		// TODO: verify that info matches what we previously loaded
+		c.lock.Unlock()
+		return nil
+	}
+
+	c.id = info.Id
+	c.metadata = info.Metadata
+	c.dataSources = make(map[string]datasource.DataSource)
+	for _, inds := range info.DataSources {
+		ds, err := datasource.NewFromAPI(inds)
+		if err != nil {
+			c.lock.Unlock()
+			return fmt.Errorf("creating DataSource from API: %w", err)
+		}
+		c.dataSources[inds.Name] = ds
+	}
+
+	// Skip params coming from the server if we're attaching; it's too late to provide params
+	// for the gadget instance so only local operators should be evaluated
+	if !c.useInstance {
+		c.params = info.Params
+	}
+	c.loaded = true
+	c.lock.Unlock()
+
+	c.Logger().Debug("loaded gadget info")
+
+	if c.metadata != nil {
+		v := viper.New()
+		v.SetConfigType("yaml")
+		err := v.ReadConfig(bytes.NewReader(c.metadata))
+		if err != nil {
+			return fmt.Errorf("unmarshalling metadata: %w", err)
+		}
+		c.logger.Debugf("loaded metadata as config")
+		c.SetVar("config", v)
+	}
+
+	// After loading gadget info, start local operators as well
+	localOperators, err := c.initAndPrepareOperators(paramValues)
+	if err != nil {
+		return fmt.Errorf("initializing local operators: %w", err)
+	}
+
+	if run {
+		if err := c.start(localOperators); err != nil {
+			return fmt.Errorf("starting local operators: %w", err)
+		}
+
+		c.Logger().Debugf("running...")
+
+		go func() {
+			// TODO: Client shouldn't need to wait for the timeout. It should be
+			// managed only on the server side.
+			WaitForTimeoutOrDone(c)
+			c.stop(localOperators)
+		}()
+	}
+
+	return nil
+}
+
+func (c *GadgetContext) OrasTarget() oras.ReadOnlyTarget {
+	return c.orasTarget
 }
 
 func WithTimeoutOrCancel(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {

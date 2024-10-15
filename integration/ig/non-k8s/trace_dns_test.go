@@ -1,4 +1,4 @@
-// Copyright 2023 The Inspektor Gadget authors
+// Copyright 2023-2024 The Inspektor Gadget authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,13 +21,19 @@ import (
 
 	. "github.com/inspektor-gadget/inspektor-gadget/integration"
 	dnsTypes "github.com/inspektor-gadget/inspektor-gadget/pkg/gadgets/trace/dns/types"
+	"github.com/inspektor-gadget/inspektor-gadget/pkg/testing/containers"
+	"github.com/inspektor-gadget/inspektor-gadget/pkg/testing/match"
 	eventtypes "github.com/inspektor-gadget/inspektor-gadget/pkg/types"
 )
 
 func newTraceDnsSteps(cn string, dnsServerArgs string) []TestStep {
+	// dnsTesterImage (image dnstester) has the following symlink:
+	// /usr/bin/nslookup -> /bin/busybox
+	exepath := "/bin/busybox"
+
 	traceDNSCmd := &Command{
 		Name:         "TraceDns",
-		Cmd:          fmt.Sprintf("./ig trace dns -o json --runtimes=%s -c %s", *runtime, cn),
+		Cmd:          fmt.Sprintf("./ig trace dns --paths -o json --runtimes=%s -c %s", *runtime, cn),
 		StartAndStop: true,
 		ValidateOutput: func(t *testing.T, output string) {
 			expectedEntries := []*dnsTypes.Event{
@@ -42,6 +48,9 @@ func newTraceDnsSteps(cn string, dnsServerArgs string) []TestStep {
 						},
 					},
 					Qr:         dnsTypes.DNSPktTypeQuery,
+					Cwd:        "/",
+					Pcomm:      "sh",
+					Exepath:    exepath,
 					Comm:       "nslookup",
 					Nameserver: "127.0.0.1",
 					PktType:    "OUTGOING",
@@ -61,6 +70,9 @@ func newTraceDnsSteps(cn string, dnsServerArgs string) []TestStep {
 						},
 					},
 					Qr:         dnsTypes.DNSPktTypeResponse,
+					Cwd:        "/",
+					Pcomm:      "sh",
+					Exepath:    exepath,
 					Comm:       "nslookup",
 					Nameserver: "127.0.0.1",
 					PktType:    "HOST",
@@ -84,6 +96,9 @@ func newTraceDnsSteps(cn string, dnsServerArgs string) []TestStep {
 						},
 					},
 					Qr:         dnsTypes.DNSPktTypeQuery,
+					Cwd:        "/",
+					Pcomm:      "sh",
+					Exepath:    exepath,
 					Comm:       "nslookup",
 					Nameserver: "127.0.0.1",
 					PktType:    "OUTGOING",
@@ -103,6 +118,9 @@ func newTraceDnsSteps(cn string, dnsServerArgs string) []TestStep {
 						},
 					},
 					Qr:         dnsTypes.DNSPktTypeResponse,
+					Cwd:        "/",
+					Pcomm:      "sh",
+					Exepath:    exepath,
 					Comm:       "nslookup",
 					Nameserver: "127.0.0.1",
 					PktType:    "HOST",
@@ -122,6 +140,7 @@ func newTraceDnsSteps(cn string, dnsServerArgs string) []TestStep {
 				e.Timestamp = 0
 				e.MountNsID = 0
 				e.NetNsID = 0
+				e.Ppid = 0
 				e.Pid = 0
 				e.Tid = 0
 
@@ -131,6 +150,7 @@ func newTraceDnsSteps(cn string, dnsServerArgs string) []TestStep {
 				}
 
 				e.Runtime.ContainerID = ""
+				e.Runtime.ContainerStartedAt = 0
 				// TODO: Handle once we support getting ContainerImageName from Docker
 				e.Runtime.ContainerImageName = ""
 				e.Runtime.ContainerImageDigest = ""
@@ -144,7 +164,7 @@ func newTraceDnsSteps(cn string, dnsServerArgs string) []TestStep {
 				}
 			}
 
-			ExpectEntriesToMatch(t, output, normalize, expectedEntries...)
+			match.MatchEntries(t, match.JSONMultiObjectMode, output, normalize, expectedEntries...)
 		},
 	}
 
@@ -158,7 +178,7 @@ func newTraceDnsSteps(cn string, dnsServerArgs string) []TestStep {
 	testSteps := []TestStep{
 		traceDNSCmd,
 		SleepForSecondsCommand(2), // wait to ensure ig has started
-		containerFactory.NewContainer(cn, strings.Join(dnsCmds, " ; "), WithContainerImage(*dnsTesterImage)),
+		containerFactory.NewContainer(cn, strings.Join(dnsCmds, " ; "), containers.WithContainerImage(*dnsTesterImage)),
 	}
 
 	return testSteps

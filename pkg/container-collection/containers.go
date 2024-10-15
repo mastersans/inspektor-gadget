@@ -1,4 +1,4 @@
-// Copyright 2022 The Inspektor Gadget authors
+// Copyright 2022-2024 The Inspektor Gadget authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -213,4 +213,26 @@ func GetColumns() *columns.Columns[Container] {
 	})
 
 	return cols
+}
+
+func (c *Container) K8sMetadata() *types.BasicK8sMetadata {
+	return &c.K8s.BasicK8sMetadata
+}
+
+func (c *Container) RuntimeMetadata() *types.BasicRuntimeMetadata {
+	return &c.Runtime.BasicRuntimeMetadata
+}
+
+func (c *Container) UsesHostNetwork() bool {
+	return c.HostNetwork
+}
+
+func (c *Container) K8sOwnerReference() *types.K8sOwnerReference {
+	if c.K8s.ownerReference == nil {
+		return &types.K8sOwnerReference{}
+	}
+	return &types.K8sOwnerReference{
+		Kind: c.K8s.ownerReference.Kind,
+		Name: c.K8s.ownerReference.Name,
+	}
 }

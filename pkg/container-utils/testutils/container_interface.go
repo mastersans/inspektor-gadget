@@ -30,16 +30,19 @@ type containerSpec struct {
 
 	// Internal state
 	id           string
+	ip           string
 	pid          int
 	started      bool
 	portBindings nat.PortMap
 }
 
 type Container interface {
+	DisplayName() string
 	Run(t *testing.T)
 	Start(t *testing.T)
 	Stop(t *testing.T)
 	ID() string
+	IP() string
 	Pid() int
 	Running() bool
 	PortBindings() nat.PortMap
@@ -47,6 +50,10 @@ type Container interface {
 
 func (c *containerSpec) ID() string {
 	return c.id
+}
+
+func (c *containerSpec) IP() string {
+	return c.ip
 }
 
 func (c *containerSpec) Pid() int {
@@ -59,6 +66,10 @@ func (c *containerSpec) Running() bool {
 
 func (c *containerSpec) PortBindings() nat.PortMap {
 	return c.portBindings
+}
+
+func (c *containerSpec) DisplayName() string {
+	return c.name + ": " + c.cmd
 }
 
 var SupportedContainerRuntimes = []types.RuntimeName{

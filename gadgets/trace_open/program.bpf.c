@@ -22,17 +22,21 @@ struct args_t {
 };
 
 struct event {
-	gadget_timestamp timestamp;
-	/* user terminology for pid: */
+	gadget_timestamp timestamp_raw;
+	gadget_mntns_id mntns_id;
+
+	char comm[TASK_COMM_LEN];
+	// user-space terminology for pid and tid
 	__u32 pid;
+	__u32 tid;
 	__u32 uid;
 	__u32 gid;
-	gadget_mntns_id mntns_id;
-	int ret;
-	int flags;
-	__u16 mode;
-	__u8 comm[TASK_COMM_LEN];
-	__u8 fname[NAME_MAX];
+
+	gadget_errno error_raw;
+	__u32 fd;
+	int flags_raw;
+	__u16 mode_raw;
+	char fname[NAME_MAX];
 };
 
 const volatile pid_t targ_pid = 0;
@@ -124,9 +128,14 @@ static __always_inline int trace_exit(struct syscall_trace_exit *ctx)
 {
 	struct event *event;
 	struct args_t *ap;
-	int ret;
-	u32 pid = bpf_get_current_pid_tgid();
-	u64 uid_gid = bpf_get_current_uid_gid();
+	long int ret;
+	__u32 fd;
+	__s32 errval;
+	__u64 pid_tgid = bpf_get_current_pid_tgid();
+	__u64 uid_gid = bpf_get_current_uid_gid();
+
+	// pid from kernel po
+	u32 pid = (u32)pid_tgid;
 
 	ap = bpf_map_lookup_elem(&start, &pid);
 	if (!ap)
@@ -139,17 +148,27 @@ static __always_inline int trace_exit(struct syscall_trace_exit *ctx)
 	if (!event)
 		goto cleanup;
 
+	fd = 0;
+	errval = 0;
+	if (ret >= 0) {
+		fd = ret;
+	} else {
+		errval = -ret;
+	}
+
 	/* event data */
-	event->pid = bpf_get_current_pid_tgid() >> 32;
+	event->pid = pid_tgid >> 32;
+	event->tid = (__u32)pid_tgid;
 	event->uid = (u32)uid_gid;
 	event->gid = (u32)(uid_gid >> 32);
 	bpf_get_current_comm(&event->comm, sizeof(event->comm));
 	bpf_probe_read_user_str(&event->fname, sizeof(event->fname), ap->fname);
-	event->flags = ap->flags;
-	event->mode = ap->mode;
-	event->ret = ret;
+	event->flags_raw = ap->flags;
+	event->mode_raw = ap->mode;
+	event->error_raw = errval;
+	event->fd = fd;
 	event->mntns_id = gadget_get_mntns_id();
-	event->timestamp = bpf_ktime_get_boot_ns();
+	event->timestamp_raw = bpf_ktime_get_boot_ns();
 
 	/* emit event */
 	gadget_submit_buf(ctx, &events, event, sizeof(*event));

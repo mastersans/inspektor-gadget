@@ -111,7 +111,7 @@ func (t *Trace) Start(trace *gadgetv1alpha1.Trace) {
 	}
 
 	var err error
-	t.tracer, err = dnsTracer.NewTracer()
+	t.tracer, err = dnsTracer.NewTracer(&dnsTracer.Config{})
 	if err != nil {
 		trace.Status.OperationError = fmt.Sprintf("Failed to start dns tracer: %s", err)
 		return
@@ -130,6 +130,12 @@ func (t *Trace) Start(trace *gadgetv1alpha1.Trace) {
 		trace.Status.OperationError = fmt.Sprintf("Failed to start dns tracer: %s", err)
 		return
 	}
+
+	if err := t.tracer.RunWorkaround(); err != nil {
+		trace.Status.OperationError = fmt.Sprintf("Failed to start dns tracer: %s", err)
+		return
+	}
+
 	t.started = true
 
 	trace.Status.State = gadgetv1alpha1.TraceStateStarted

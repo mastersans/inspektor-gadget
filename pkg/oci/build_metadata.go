@@ -1,4 +1,4 @@
-// Copyright 2023 The Inspektor Gadget authors
+// Copyright 2023-2024 The Inspektor Gadget authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ import (
 	"gopkg.in/yaml.v2"
 
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/gadgets/run/types"
+	metadatav1 "github.com/inspektor-gadget/inspektor-gadget/pkg/metadata/v1"
 )
 
 func loadSpec(progContent []byte) (*ebpf.CollectionSpec, error) {
@@ -44,8 +45,8 @@ func getAnySpec(opts *BuildGadgetImageOpts) (*ebpf.CollectionSpec, error) {
 	// TODO: we could perform a sanity check to be sure different architectures generate the
 	// same metadata, but that's too much for now.
 	// We're validating the metadata at runtime, so a possible error will be caught there.
-	for _, path := range opts.EBPFObjectPaths {
-		progPath = path
+	for _, paths := range opts.ObjectPaths {
+		progPath = paths.EBPF
 		break
 	}
 
@@ -68,7 +69,7 @@ func validateMetadataFile(ctx context.Context, opts *BuildGadgetImageOpts) error
 	}
 	defer metadataFile.Close()
 
-	metadata := &types.GadgetMetadata{}
+	metadata := &metadatav1.GadgetMetadata{}
 	if err := yaml.NewDecoder(metadataFile).Decode(metadata); err != nil {
 		return fmt.Errorf("decoding metadata file: %w", err)
 	}
@@ -78,7 +79,7 @@ func validateMetadataFile(ctx context.Context, opts *BuildGadgetImageOpts) error
 		return fmt.Errorf("loading spec: %w", err)
 	}
 
-	return metadata.Validate(spec)
+	return types.Validate(metadata, spec)
 }
 
 func createOrUpdateMetadataFile(ctx context.Context, opts *BuildGadgetImageOpts) error {
@@ -90,7 +91,7 @@ func createOrUpdateMetadataFile(ctx context.Context, opts *BuildGadgetImageOpts)
 	_, statErr := os.Stat(opts.MetadataPath)
 	update := statErr == nil
 
-	metadata := &types.GadgetMetadata{}
+	metadata := &metadatav1.GadgetMetadata{}
 
 	if update {
 		// load metadata file
@@ -107,15 +108,15 @@ func createOrUpdateMetadataFile(ctx context.Context, opts *BuildGadgetImageOpts)
 		log.Debugf("Metadata file found, updating it")
 
 		// TODO: this validation could be softer, just printing warnings
-		if err := metadata.Validate(spec); err != nil {
+		if err := types.Validate(metadata, spec); err != nil {
 			return fmt.Errorf("metadata file is wrong, fix it before continuing: %w", err)
 		}
 	} else {
 		log.Debug("Metadata file not found, generating it")
 	}
 
-	if err := metadata.Populate(spec); err != nil {
-		return fmt.Errorf("handling trace maps: %w", err)
+	if err := types.Populate(metadata, spec); err != nil {
+		return fmt.Errorf("populating metadata: %w", err)
 	}
 
 	marshalled, err := yaml.Marshal(metadata)
@@ -129,7 +130,7 @@ func createOrUpdateMetadataFile(ctx context.Context, opts *BuildGadgetImageOpts)
 
 	// fix owner of created metadata file
 	if !update {
-		if err := fixMetadataOwner(opts); err != nil {
+		if err := fixOwner(opts.MetadataPath, opts.EBPFSourcePath); err != nil {
 			log.Warnf("Failed to fix metadata file owner: %v", err)
 		}
 	}

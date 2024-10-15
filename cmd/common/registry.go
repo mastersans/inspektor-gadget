@@ -1,4 +1,4 @@
-// Copyright 2022-2023 The Inspektor Gadget authors
+// Copyright 2022-2024 The Inspektor Gadget authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,7 +16,6 @@ package common
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -33,19 +32,11 @@ import (
 	gadgetcontext "github.com/inspektor-gadget/inspektor-gadget/pkg/gadget-context"
 	gadgetregistry "github.com/inspektor-gadget/inspektor-gadget/pkg/gadget-registry"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/gadgets"
-	runTypes "github.com/inspektor-gadget/inspektor-gadget/pkg/gadgets/run/types"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/logger"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/operators"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/params"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/parser"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/runtime"
-)
-
-const (
-	OutputModeColumns    = "columns"
-	OutputModeJSON       = "json"
-	OutputModeJSONPretty = "jsonpretty"
-	OutputModeYAML       = "yaml"
 )
 
 const (
@@ -155,7 +146,7 @@ func buildColumnsOutputFormat(gadgetParams *params.Params, parser parser.Parser,
 
 	of.Description += out.String()
 
-	return gadgets.OutputFormats{OutputModeColumns: of}
+	return gadgets.OutputFormats{utils.OutputModeColumns: of}
 }
 
 func buildOutputFormatsHelp(outputFormats gadgets.OutputFormats) []string {
@@ -186,8 +177,6 @@ func buildCommandFromGadget(
 	operatorsParamsCollection params.Collection,
 	hiddenColumnTags []string,
 ) *cobra.Command {
-	runGadgetDesc, isRunGadget := gadgetDesc.(runTypes.RunGadgetDesc)
-	var runGadgetInfo *runTypes.GadgetInfo
 	gType := gadgetDesc.Type()
 	var outputMode string
 	var filters []string
@@ -249,36 +238,6 @@ func buildCommandFromGadget(
 			// gadget parameters that are only available after contacting the server
 			extraGadgetParams := make(params.Params, 0)
 
-			// Before running the gadget, we need to get the gadget info to perform
-			// different tasks like creating the parser and setting flags for the
-			// gadget's parameters.
-			onlyArgs := cmd.Flags().Args()
-			if isRunGadget && len(onlyArgs) > 0 {
-				var err error
-				runGadgetInfo, err = runtime.GetGadgetInfo(context.TODO(), gadgetDesc, gadgetParams, onlyArgs)
-				if err != nil {
-					return fmt.Errorf("getting gadget info: %w", err)
-				}
-
-				gType = runGadgetInfo.GadgetType
-
-				parser, err = runGadgetDesc.CustomParser(runGadgetInfo)
-				if err != nil {
-					return fmt.Errorf("calling custom parser: %w", err)
-				}
-
-				params := params.Params{}
-				for _, desc := range runGadgetInfo.GadgetMetadata.EBPFParams {
-					desc := desc
-					params.Add(desc.ToParam())
-				}
-				for _, desc := range runGadgetInfo.GadgetMetadata.GadgetParams {
-					desc := desc
-					params.Add(desc.ToParam())
-				}
-
-				extraGadgetParams.Add(params...)
-			}
 			// add flags
 			if gType != gadgets.TypeOneShot {
 				// Add timeout
@@ -298,28 +257,28 @@ func buildCommandFromGadget(
 			AddFlags(cmd, &extraGadgetParams, skipParams, runtime)
 
 			outputFormats.Append(gadgets.OutputFormats{
-				OutputModeJSON: {
+				utils.OutputModeJSON: {
 					Name:        "JSON",
 					Description: "The output of the gadget is returned as raw JSON",
 					Transform:   nil,
 				},
-				OutputModeJSONPretty: {
+				utils.OutputModeJSONPretty: {
 					Name:        "JSON Prettified",
 					Description: "The output of the gadget is returned as prettified JSON",
 					Transform:   nil,
 				},
-				OutputModeYAML: {
+				utils.OutputModeYAML: {
 					Name:        "YAML",
 					Description: "The output of the gadget is returned as YAML",
 					Transform:   nil,
 				},
 			})
-			defaultOutputFormat = OutputModeJSON
+			defaultOutputFormat = utils.OutputModeJSON
 
 			// Add parser output flags
 			if parser != nil {
 				outputFormats.Append(buildColumnsOutputFormat(gadgetParams, parser, hiddenColumnTags))
-				defaultOutputFormat = "columns"
+				defaultOutputFormat = utils.OutputModeColumns
 
 				cmd.PersistentFlags().StringSliceVarP(
 					&filters,
@@ -365,16 +324,6 @@ func buildCommandFromGadget(
 			// so we need to manually pull the remaining args here
 			args := cmd.Flags().Args()
 
-			if isRunGadget {
-				if len(args) == 0 {
-					if showHelp, _ := cmd.Flags().GetBool("help"); showHelp {
-						additionalMessage := "Specify the gadget image to get more information about it"
-						cmd.Long = fmt.Sprintf("%s\n\n%s", cmd.Short, additionalMessage)
-					}
-					return cmd.Help()
-				}
-			}
-
 			if showHelp, _ := cmd.Flags().GetBool("help"); showHelp {
 				return cmd.Help()
 			}
@@ -418,7 +367,7 @@ func buildCommandFromGadget(
 				timeoutDuration = time.Duration(timeout) * time.Second
 			}
 
-			gadgetCtx := gadgetcontext.New(
+			gadgetCtx := gadgetcontext.NewBuiltIn(
 				ctx,
 				"",
 				runtime,
@@ -430,7 +379,6 @@ func buildCommandFromGadget(
 				parser,
 				logger.DefaultLogger(),
 				timeoutDuration,
-				runGadgetInfo,
 			)
 			defer gadgetCtx.Cancel()
 
@@ -456,12 +404,12 @@ func buildCommandFromGadget(
 					}
 
 					transformResult = formats[outputModeName].Transform
-				case OutputModeJSON:
+				case utils.OutputModeJSON:
 					transformResult = func(result any) ([]byte, error) {
 						r, _ := result.([]byte)
 						return r, nil
 					}
-				case OutputModeJSONPretty:
+				case utils.OutputModeJSONPretty:
 					transformResult = func(result any) ([]byte, error) {
 						var out bytes.Buffer
 
@@ -472,7 +420,7 @@ func buildCommandFromGadget(
 
 						return out.Bytes(), nil
 					}
-				case OutputModeYAML:
+				case utils.OutputModeYAML:
 					transformResult = func(result any) ([]byte, error) {
 						d, err := k8syaml.JSONToYAML(result.([]byte))
 						if err != nil {
@@ -489,7 +437,7 @@ func buildCommandFromGadget(
 				// This kind of gadgets return directly the result instead of
 				// using the parser. We allow partial results, so error is only
 				// returned after handling those results.
-				results, err := runtime.RunGadget(gadgetCtx)
+				results, err := runtime.RunBuiltInGadget(gadgetCtx)
 
 				for node, result := range results {
 					if result.Error != nil {
@@ -662,7 +610,7 @@ func buildCommandFromGadget(
 					}
 					fe.Output(string(transformed))
 				})
-			case OutputModeColumns:
+			case utils.OutputModeColumns:
 				formatter.SetEventCallback(fe.Output)
 
 				// Enable additional output, if the gadget supports it (e.g. profile/cpu)
@@ -689,29 +637,20 @@ func buildCommandFromGadget(
 				}
 				fe.Output(formatter.FormatHeader())
 				parser.SetEventCallback(formatter.EventHandlerFuncArray())
-			case OutputModeJSON:
+			case utils.OutputModeJSON:
 				jsonCallback := printEventAsJSONFn(fe)
-				if isRunGadget {
-					jsonCallback = runGadgetDesc.JSONConverter(runGadgetInfo, fe)
-				}
 				parser.SetEventCallback(jsonCallback)
-			case OutputModeJSONPretty:
+			case utils.OutputModeJSONPretty:
 				jsonPrettyCallback := printEventAsJSONPrettyFn(fe)
-				if isRunGadget {
-					jsonPrettyCallback = runGadgetDesc.JSONPrettyConverter(runGadgetInfo, fe)
-				}
 				parser.SetEventCallback(jsonPrettyCallback)
-			case OutputModeYAML:
+			case utils.OutputModeYAML:
 				yamlCallback := printEventAsYAMLFn(fe)
-				if isRunGadget {
-					yamlCallback = runGadgetDesc.YAMLConverter(runGadgetInfo, fe)
-				}
 				parser.SetEventCallback(yamlCallback)
 			}
 
 			// Gadgets with parser don't return anything, they provide the
 			// output via the parser
-			_, err = runtime.RunGadget(gadgetCtx)
+			_, err = runtime.RunBuiltInGadget(gadgetCtx)
 			if err != nil {
 				return fmt.Errorf("running gadget: %w", err)
 			}
@@ -731,12 +670,6 @@ func buildCommandFromGadget(
 	// Add operator flags
 	for _, operatorParams := range operatorsParamsCollection {
 		AddFlags(cmd, operatorParams, skipParams, runtime)
-	}
-
-	if exp, ok := gadgetDesc.(gadgets.GadgetExperimental); ok {
-		if exp.Experimental() {
-			utils.MarkExperimental(cmd)
-		}
 	}
 
 	return cmd

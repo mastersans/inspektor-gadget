@@ -49,6 +49,8 @@ type Tracer struct {
 	capExitLink   link.Link
 	tpSysEnter    link.Link
 	tpSysExit     link.Link
+	tpSchedExec   link.Link
+	tpSchedExit   link.Link
 	reader        *perf.Reader
 	enricher      gadgets.DataEnricherByMntNs
 	eventCallback func(*types.Event)
@@ -128,6 +130,8 @@ func (t *Tracer) close() {
 	t.capExitLink = gadgets.CloseLink(t.capExitLink)
 	t.tpSysEnter = gadgets.CloseLink(t.tpSysEnter)
 	t.tpSysExit = gadgets.CloseLink(t.tpSysExit)
+	t.tpSchedExec = gadgets.CloseLink(t.tpSchedExec)
+	t.tpSchedExit = gadgets.CloseLink(t.tpSchedExit)
 
 	if t.reader != nil {
 		t.reader.Close()
@@ -169,6 +173,18 @@ func (t *Tracer) install() error {
 	}
 	t.tpSysEnter = tp
 
+	tp, err = link.Tracepoint("sched", "sched_process_exec", t.objs.IgCapSchedExec, nil)
+	if err != nil {
+		return fmt.Errorf("attaching tracepoint: %w", err)
+	}
+	t.tpSchedExec = tp
+
+	tp, err = link.Tracepoint("sched", "sched_process_exit", t.objs.IgCapSchedExit, nil)
+	if err != nil {
+		return fmt.Errorf("attaching tracepoint: %w", err)
+	}
+	t.tpSchedExit = tp
+
 	kprobe, err := link.Kprobe("cap_capable", t.objs.IgTraceCapE, nil)
 	if err != nil {
 		return fmt.Errorf("attaching kprobe: %w", err)
@@ -186,6 +202,10 @@ func (t *Tracer) install() error {
 		return fmt.Errorf("creating perf ring buffer: %w", err)
 	}
 	t.reader = reader
+
+	if err := gadgets.FreezeMaps(t.objs.capabilitiesMaps.Events); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -265,7 +285,7 @@ func (t *Tracer) run() {
 			WithMountNsID: eventtypes.WithMountNsID{MountNsID: bpfEvent.Mntnsid},
 			TargetUserNs:  bpfEvent.TargetUserns,
 			CurrentUserNs: bpfEvent.CurrentUserns,
-			Pid:           bpfEvent.Pid,
+			Pid:           bpfEvent.Tgid,
 			Cap:           int(bpfEvent.Cap),
 			Uid:           bpfEvent.Uid,
 			Gid:           bpfEvent.Gid,

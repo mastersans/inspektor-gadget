@@ -1,17 +1,15 @@
 # Dockerfile for Inspektor Gadget.
 
-ARG BUILDER_IMAGE=golang:1.21-bullseye
-ARG BASE_IMAGE=gcr.io/distroless/base-debian12
+ARG BUILDER_IMAGE=golang:1.22-bullseye@sha256:fafd203dccbe662bd2a95d47aff611146ce33a1543561a0b490c68ee48adc4f5
+ARG BASE_IMAGE=gcr.io/distroless/static-debian12@sha256:ce46866b3a5170db3b49364900fb3168dc0833dfb46c26da5c77f22abb01d8c3
 
-# bpftrace upstream image
-ARG BPFTRACE="ghcr.io/inspektor-gadget/bpftrace"
-
-FROM ${BPFTRACE} as bpftrace
 # Prepare and build gadget artifacts in a container
-FROM --platform=${BUILDPLATFORM} ${BUILDER_IMAGE} as builder
+FROM --platform=${BUILDPLATFORM} ${BUILDER_IMAGE} AS builder
 
 ARG TARGETARCH
 ARG BUILDARCH
+ARG VERSION=v0.0.0
+ENV VERSION=${VERSION}
 
 ARG GOPROXY
 ENV GOPROXY=${GOPROXY}
@@ -53,5 +51,3 @@ COPY --from=builder /gadget/gadget-container/bin/nrigadget /opt/hooks/nri/
 COPY gadget-container/hooks/nri/conf.json /opt/hooks/nri/
 
 ## Hooks Ends
-
-COPY --from=bpftrace /usr/bin/bpftrace /usr/bin/bpftrace

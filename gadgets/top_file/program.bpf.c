@@ -8,6 +8,7 @@
 #include <bpf/bpf_tracing.h>
 
 #include <gadget/mntns_filter.h>
+#include <gadget/filesystem.h>
 #include <gadget/types.h>
 #include <gadget/macros.h>
 
@@ -36,15 +37,15 @@ struct file_id {
 
 struct file_stat {
 	gadget_mntns_id mntns_id;
+	__u32 uid;
+	__u32 gid;
 	__u64 reads;
 	__u64 rbytes;
 	__u64 writes;
 	__u64 wbytes;
-	__u32 pid;
-	__u32 tid;
-	__u8 file[PATH_MAX];
-	__u8 comm[TASK_COMM_LEN];
-	enum type t;
+	char file[PATH_MAX];
+	char comm[TASK_COMM_LEN];
+	enum type t_raw;
 };
 
 #define MAX_ENTRIES 10240
@@ -65,19 +66,20 @@ struct {
 	__type(value, struct file_stat);
 } stats SEC(".maps");
 
-GADGET_TOPPER(file, stats);
+GADGET_MAPITER(file, stats);
 
 static void get_file_path(struct file *file, __u8 *buf, size_t size)
 {
-	struct qstr dname;
-
-	dname = BPF_CORE_READ(file, f_path.dentry, d_name);
-	bpf_probe_read_kernel(buf, size, dname.name);
+	struct path f_path = BPF_CORE_READ(file, f_path);
+	// Extract the full path string
+	char *c_path = get_path_str(&f_path);
+	bpf_probe_read_kernel_str(buf, PATH_MAX, c_path);
 }
 
 static int probe_entry(struct pt_regs *ctx, struct file *file, size_t count,
 		       enum op op)
 {
+	__u64 uid_gid;
 	__u64 pid_tgid = bpf_get_current_pid_tgid();
 	__u32 pid = pid_tgid >> 32;
 	__u32 tid = (__u32)pid_tgid;
@@ -108,18 +110,19 @@ static int probe_entry(struct pt_regs *ctx, struct file *file, size_t count,
 		valuep = bpf_map_lookup_elem(&stats, &key);
 		if (!valuep)
 			return 0;
-		valuep->pid = pid;
-		valuep->tid = tid;
 		valuep->mntns_id = mntns_id;
 		bpf_get_current_comm(&valuep->comm, sizeof(valuep->comm));
 		get_file_path(file, valuep->file, sizeof(valuep->file));
 		if (S_ISREG(mode)) {
-			valuep->t = R;
+			valuep->t_raw = R;
 		} else if (S_ISSOCK(mode)) {
-			valuep->t = S;
+			valuep->t_raw = S;
 		} else {
-			valuep->t = O;
+			valuep->t_raw = O;
 		}
+		uid_gid = bpf_get_current_uid_gid();
+		valuep->uid = uid_gid;
+		valuep->gid = uid_gid >> 32;
 	}
 	if (op == READ) {
 		valuep->reads++;

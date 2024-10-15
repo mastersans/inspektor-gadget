@@ -1,41 +1,42 @@
 name: snapshot process
 description: Show running processes
-snapshotters:
+homepageURL: https://inspektor-gadget.io/
+documentationURL: https://www.inspektor-gadget.io/docs/latest/gadgets/snapshot_process
+sourceURL: https://github.com/inspektor-gadget/inspektor-gadget/tree/main/gadgets/snapshot_process
+datasources:
   processes:
-    structName: process_entry
-structs:
-  process_entry:
     fields:
-    - name: comm
-      description: Process name
-      attributes:
-        template: comm
-    - name: pid
-      description: Process ID
-      attributes:
-        template: pid
-    - name: tid
-      description: Thread ID
-      attributes:
-        template: pid
-    - name: ppid
-      description: Parent process ID
-      attributes:
-        template: pid
-    - name: uid
-      description: User ID
-      attributes:
-        template: uid
-    - name: gid
-      description: Group ID
-      attributes:
-        template: uid
-    - name: mntns_id
-      description: 'Mount namespace inode id'
-      attributes:
-        template: ns
-ebpfParams:
-  show_threads:
-    key: threads
-    defaultValue: "false"
-    description: Show all threads (by default, only processes are shown)
+      comm:
+        annotations:
+          description: Process name
+          template: comm
+      pid:
+        annotations:
+          description: Process ID
+          template: pid
+      tid:
+        annotations:
+          description: Thread ID
+          template: pid
+      ppid:
+        annotations:
+          description: Parent process ID
+          template: pid
+      uid:
+        annotations:
+          description: User ID
+          template: uid
+      gid:
+        annotations:
+          description: Group ID
+          template: uid
+      mntns_id:
+        annotations:
+          description: Mount namespace inode id
+          template: ns
+params:
+  ebpf:
+    show_threads:
+      key: threads
+      defaultValue: "false"
+      description: Show all threads (by default, only processes are shown)

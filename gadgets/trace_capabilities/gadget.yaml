@@ -1,0 +1,94 @@
+name: trace capabilities
+description: trace security capabilitiy checks
+homepageURL: https://inspektor-gadget.io/
+documentationURL: https://www.inspektor-gadget.io/docs/latest/gadgets/trace_capabilities
+sourceURL: https://github.com/inspektor-gadget/inspektor-gadget/tree/main/gadgets/trace_capabilities
+datasources:
+  capabilities:
+    fields:
+      timestamp_raw:
+        annotations:
+          columns.hidden: true
+      timestamp:
+        annotations:
+          template: timestamp
+      mntns_id:
+        annotations:
+          description: Mount namespace inode id
+          template: ns
+      comm:
+        annotations:
+          description: Process name
+          template: comm
+      pid:
+        annotations:
+          description: Process ID
+          template: pid
+      tid:
+        annotations:
+          description: Thread ID
+          template: pid
+      uid:
+        annotations:
+          description: User ID
+          template: uid
+      gid:
+        annotations:
+          description: Group ID
+          template: uid
+      current_userns:
+        annotations:
+          template: ns
+      target_userns:
+        annotations:
+          template: ns
+      cap_effective_raw:
+        annotations:
+          columns.hidden: true
+      cap_effective:
+        annotations:
+          columns.width: 20
+          columns.hidden: true
+      cap_raw:
+        annotations:
+          columns.hidden: true
+      cap:
+      audit:
+        annotations:
+          columns.width: 11
+      insetid:
+        annotations:
+          columns.width: 11
+          columns.hidden: true
+      syscall_raw:
+        annotations:
+          columns.hidden: true
+      syscall:
+        annotations:
+          columns.width: 20
+      kstack_raw:
+        annotations:
+          columns.hidden: true
+      kstack:
+        annotations:
+          description: kernel stack
+          columns.width: 10
+          columns.hidden: true
+      capable:
+        annotations:
+          description: if the process has the requested capability
+          columns.width: 10
+params:
+  ebpf:
+    audit_only:
+      key: audit-only
+      defaultValue: "false"
+      description: Only show audit checks
+    print_stack:
+      key: print-stack
+      defaultValue: "true"
+      description: controls whether the gadget will send kernel stack to userspace
+    unique:
+      key: unique
+      defaultValue: "false"
+      description: Only show a capability once on the same container

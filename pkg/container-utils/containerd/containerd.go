@@ -20,9 +20,9 @@ import (
 	"time"
 
 	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/pkg/cri/constants"
+	"github.com/containerd/errdefs"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -72,6 +72,7 @@ func NewContainerdClient(socketPath string, protocol string, config *containerut
 
 	dialCtx, cancelFunc := context.WithTimeout(context.TODO(), DefaultTimeout)
 	defer cancelFunc()
+	//nolint:staticcheck
 	grpcConn, err := grpc.DialContext(
 		dialCtx,
 		"unix:"+socketPath,

@@ -1,44 +1,45 @@
-name: sni
+name: trace sni
 description: trace sni
-tracers:
+homepageURL: https://inspektor-gadget.io/
+documentationURL: https://www.inspektor-gadget.io/docs/latest/gadgets/trace_sni
+sourceURL: https://github.com/inspektor-gadget/inspektor-gadget/tree/main/gadgets/trace_sni
+datasources:
   sni:
-    mapName: events
-    structName: event_t
-
-structs:
-  event_t:
     fields:
-    - name: timestamp
-      attributes:
-        template: timestamp
-    - name: pid
-      description: PID of the process that sent the request
-      attributes:
-        template: pid
-    - name: task
-      attributes:
-        template: comm
-    - name: uid
-      attributes:
-        hidden: true
-        template: uid
-    - name: gid
-      attributes:
-        hidden: true
-        template: uid
-    - name: name
-      attributes:
-        width: 30
-    - name: netns
-      description: 'Network namespace inode id'
-      attributes:
-        template: ns
-    - name: mntns_id
-      description: 'Mount namespace inode id'
-      attributes:
-        template: ns
-    - name: tid
-      description: TID of the thread sending the request
-      attributes:
-        template: pid
-        hidden: true
+      timestamp_raw:
+        annotations:
+          columns.hidden: true
+      timestamp:
+        annotations:
+          template: timestamp
+      netns_id:
+        annotations:
+          description: Network namespace inode id
+          template: ns
+      mntns_id:
+        annotations:
+          description: Mount namespace inode id
+          template: ns
+      comm:
+        annotations:
+          description: Process name
+          template: comm
+      pid:
+        annotations:
+          description: Process ID
+          template: pid
+      tid:
+        annotations:
+          description: Thread ID
+          template: pid
+      uid:
+        annotations:
+          description: User ID
+          template: uid
+      gid:
+        annotations:
+          description: Group ID
+          template: uid
+      name:
+        annotations:
+          columns.width: 30

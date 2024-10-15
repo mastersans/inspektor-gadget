@@ -16,14 +16,14 @@ package image
 
 import (
 	"context"
-	_ "embed"
+	"embed"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,16 +33,17 @@ import (
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
+	"github.com/moby/moby/pkg/jsonmessage"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
 
 	"github.com/inspektor-gadget/inspektor-gadget/cmd/common"
-	"github.com/inspektor-gadget/inspektor-gadget/cmd/common/utils"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/oci"
 )
 
-//go:embed Makefile.build
-var makefile []byte
+//go:embed helpers
+var helpersFS embed.FS
 
 // It can be overridden at build time
 var builderImage = "ghcr.io/inspektor-gadget/ebpf-builder:latest"
@@ -66,9 +67,12 @@ type cmdOpts struct {
 	fileChanged      bool
 	image            string
 	local            bool
+	outputDir        string
 	builderImage     string
 	updateMetadata   bool
 	validateMetadata bool
+	btfgen           bool
+	btfhubarchive    string
 }
 
 func NewBuildCmd() *cobra.Command {
@@ -95,12 +99,35 @@ func NewBuildCmd() *cobra.Command {
 
 	cmd.Flags().StringVarP(&opts.file, "file", "f", "build.yaml", "Path to build.yaml")
 	cmd.Flags().BoolVarP(&opts.local, "local", "l", false, "Build using local tools")
+	cmd.Flags().StringVarP(&opts.outputDir, "output", "o", "", "Path to a folder to store generated files while building")
 	cmd.Flags().StringVarP(&opts.image, "tag", "t", "", "Name for the built image (format name:tag)")
 	cmd.Flags().StringVar(&opts.builderImage, "builder-image", builderImage, "Builder image to use")
 	cmd.Flags().BoolVar(&opts.updateMetadata, "update-metadata", false, "Update the metadata according to the eBPF code")
 	cmd.Flags().BoolVar(&opts.validateMetadata, "validate-metadata", true, "Validate the metadata file before building the gadget image")
 
-	return utils.MarkExperimental(cmd)
+	cmd.Flags().BoolVar(&opts.btfgen, "btfgen", false, "Enable btfgen")
+	cmd.Flags().StringVar(&opts.btfhubarchive, "btfhub-archive", "", "Path to the location of the btfhub-archive files")
+
+	return cmd
+}
+
+func buildCmd(outputDir, ebpf, wasm, cflags, btfhubarchive string, btfgen bool) []string {
+	cmd := []string{
+		"make", "-f", filepath.Join(outputDir, "Makefile.build"),
+		"-j", fmt.Sprintf("%d", runtime.NumCPU()),
+		"EBPFSOURCE=" + ebpf,
+		"WASM=" + wasm,
+		"OUTPUTDIR=" + outputDir,
+		"CFLAGS=" + cflags,
+		"all",
+	}
+
+	if btfgen {
+		cmd = append(cmd, "BTFHUB_ARCHIVE="+btfhubarchive)
+		cmd = append(cmd, "btfgen")
+	}
+
+	return cmd
 }
 
 func runBuild(cmd *cobra.Command, opts *cmdOpts) error {
@@ -126,16 +153,32 @@ func runBuild(cmd *cobra.Command, opts *cmdOpts) error {
 		}
 	}
 
+	if opts.btfgen && opts.btfhubarchive == "" {
+		return errors.New("btfgen requires --btfhub-archive")
+	}
+
+	if opts.btfgen {
+		cmd.Printf("btfgen is enabled, building will take a while...\n")
+	}
+
 	if err := yaml.Unmarshal(buildContent, conf); err != nil {
 		return fmt.Errorf("unmarshaling build.yaml: %w", err)
 	}
 
-	// make a temp folder to store the build results
-	tmpDir, err := os.MkdirTemp("", "gadget-build-")
-	if err != nil {
-		return fmt.Errorf("creating temp dir: %w", err)
+	if opts.outputDir != "" {
+		if _, err := os.Stat(opts.outputDir); err != nil {
+			return err
+		}
+	} else {
+		// make a temp folder to store the build results
+		tmpDir, err := os.MkdirTemp("", "gadget-build-")
+		if err != nil {
+			return fmt.Errorf("creating temp dir: %w", err)
+		}
+		defer os.RemoveAll(tmpDir)
+
+		opts.outputDir = tmpDir
 	}
-	defer os.RemoveAll(tmpDir)
 
 	if opts.path != "." {
 		cwd, err := os.Getwd()
@@ -153,34 +196,86 @@ func runBuild(cmd *cobra.Command, opts *cmdOpts) error {
 		return fmt.Errorf("source file %q not found", conf.EBPFSource)
 	}
 
+	// copy helper files
+	files, err := helpersFS.ReadDir("helpers")
+	if err != nil {
+		return fmt.Errorf("reading helpers: %w", err)
+	}
+
+	for _, file := range files {
+		if file.IsDir() {
+			continue
+		}
+
+		data, err := helpersFS.ReadFile(filepath.Join("helpers", file.Name()))
+		if err != nil {
+			return fmt.Errorf("reading helper file: %w", err)
+		}
+
+		if err := os.WriteFile(filepath.Join(opts.outputDir, file.Name()), data, 0o600); err != nil {
+			return fmt.Errorf("writing helper file: %w", err)
+		}
+	}
+
 	if opts.local {
-		if err := buildLocal(opts, conf, tmpDir); err != nil {
-			return err
+		cmd := buildCmd(opts.outputDir, conf.EBPFSource, conf.Wasm, conf.CFlags, opts.btfhubarchive, opts.btfgen)
+		command := exec.Command(cmd[0], cmd[1:]...)
+		if out, err := command.CombinedOutput(); err != nil {
+			return fmt.Errorf("build script: %w: %s", err, out)
 		}
 	} else {
-		if err := buildInContainer(opts, conf, tmpDir); err != nil {
+		if err := buildInContainer(opts, conf); err != nil {
 			return err
 		}
+	}
+
+	// TODO: make this configurable?
+	archs := []string{oci.ArchAmd64, oci.ArchArm64}
+	objectsPaths := map[string]*oci.ObjectPath{}
+
+	for _, arch := range archs {
+		obj := &oci.ObjectPath{
+			EBPF: filepath.Join(opts.outputDir, arch+".bpf.o"),
+		}
+
+		// TODO: the same wasm file is provided for all architectures. Should we allow per-arch
+		// wasm files?
+		if strings.HasSuffix(conf.Wasm, ".wasm") {
+			// User provided an already-built wasm file
+			obj.Wasm = conf.Wasm
+		} else if conf.Wasm != "" {
+			// User provided a source file to build wasm from
+			obj.Wasm = filepath.Join(opts.outputDir, "program.wasm")
+		}
+
+		if opts.btfgen {
+			archClean := arch
+			if arch == oci.ArchAmd64 {
+				archClean = "x86_64"
+			}
+
+			obj.Btfgen = filepath.Join(opts.outputDir, fmt.Sprintf("btfs-%s.tar.gz", archClean))
+		}
+
+		objectsPaths[arch] = obj
 	}
 
 	buildOpts := &oci.BuildGadgetImageOpts{
-		EBPFSourcePath: conf.EBPFSource,
-		EBPFObjectPaths: map[string]string{
-			oci.ArchAmd64: filepath.Join(tmpDir, oci.ArchAmd64+".bpf.o"),
-			oci.ArchArm64: filepath.Join(tmpDir, oci.ArchArm64+".bpf.o"),
-		},
+		EBPFSourcePath:   conf.EBPFSource,
+		ObjectPaths:      objectsPaths,
 		MetadataPath:     conf.Metadata,
 		UpdateMetadata:   opts.updateMetadata,
 		ValidateMetadata: opts.validateMetadata,
-		CreatedDate:      time.Now().Format(time.RFC3339),
 	}
 
-	if strings.HasSuffix(conf.Wasm, ".wasm") {
-		// User provided an already-built wasm file
-		buildOpts.WasmObjectPath = conf.Wasm
-	} else if conf.Wasm != "" {
-		// User provided a source file to build wasm from
-		buildOpts.WasmObjectPath = filepath.Join(tmpDir, "program.wasm")
+	if sourceDateEpoch, ok := os.LookupEnv("SOURCE_DATE_EPOCH"); ok {
+		sde, err := strconv.ParseInt(sourceDateEpoch, 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid SOURCE_DATE_EPOCH: %w", err)
+		}
+		buildOpts.CreatedDate = time.Unix(sde, 0).UTC().Format(time.RFC3339)
+	} else {
+		buildOpts.CreatedDate = time.Now().Format(time.RFC3339)
 	}
 
 	desc, err := oci.BuildGadgetImage(context.TODO(), buildOpts, opts.image)
@@ -193,28 +288,40 @@ func runBuild(cmd *cobra.Command, opts *cmdOpts) error {
 	return nil
 }
 
-func buildLocal(opts *cmdOpts, conf *buildFile, output string) error {
-	makefilePath := filepath.Join(output, "Makefile")
-	if err := os.WriteFile(makefilePath, makefile, 0o644); err != nil {
-		return fmt.Errorf("writing Makefile: %w", err)
+func ensureBuilderImage(ctx context.Context, cli *client.Client, builderImage string) error {
+	f := filters.NewArgs()
+	f.Add("reference", builderImage)
+
+	// For :latest we always want to have the newest image that is available upstream
+	if !strings.HasSuffix(builderImage, ":latest") {
+		images, err := cli.ImageList(ctx, image.ListOptions{Filters: f})
+		if err != nil {
+			return fmt.Errorf("listing images: %w", err)
+		}
+
+		for _, img := range images {
+			for _, tag := range img.RepoTags {
+				if tag == builderImage {
+					return nil
+				}
+			}
+		}
 	}
 
-	buildCmd := exec.Command(
-		"make", "-f", makefilePath,
-		"-j", fmt.Sprintf("%d", runtime.NumCPU()),
-		"EBPFSOURCE="+conf.EBPFSource,
-		"WASM="+conf.Wasm,
-		"OUTPUTDIR="+output,
-		"CFLAGS="+conf.CFlags,
-	)
-	if out, err := buildCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("build script: %w: %s", err, out)
+	fmt.Printf("Pulling builder image %s\n", builderImage)
+	reader, err := cli.ImagePull(ctx, builderImage, image.PullOptions{})
+	if err != nil {
+		return fmt.Errorf("pulling builder image: %w", err)
 	}
+	defer reader.Close()
 
-	return nil
+	out := os.Stdout
+	outFd := out.Fd()
+	isTTY := term.IsTerminal(int(outFd))
+	return jsonmessage.DisplayJSONMessagesStream(reader, out, outFd, isTTY, nil)
 }
 
-func buildInContainer(opts *cmdOpts, conf *buildFile, output string) error {
+func buildInContainer(opts *cmdOpts, conf *buildFile) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("getting current directory: %w", err)
@@ -227,70 +334,68 @@ func buildInContainer(opts *cmdOpts, conf *buildFile, output string) error {
 	}
 	defer cli.Close()
 
-	f := filters.NewArgs()
-	f.Add("reference", opts.builderImage)
-
-	images, err := cli.ImageList(ctx, image.ListOptions{Filters: f})
-	if err != nil {
-		return fmt.Errorf("listing images: %w", err)
+	if err := ensureBuilderImage(ctx, cli, opts.builderImage); err != nil {
+		return err
 	}
 
-	var found bool
+	// where the gadget source code is mounted in the container
+	gadgetSourcePath := "/work"
+	pathHost := cwd
 
-	for _, img := range images {
-		for _, tag := range img.RepoTags {
-			if tag == opts.builderImage {
-				found = true
-				break
-			}
+	inspektorGadetSrcPath := os.Getenv("IG_SOURCE_PATH")
+	if inspektorGadetSrcPath != "" {
+		pathHost = inspektorGadetSrcPath
+		// find the gadget relative path to the inspektor-gadget source
+		if !strings.HasPrefix(cwd, inspektorGadetSrcPath) {
+			return fmt.Errorf("the current directory %q is not under the inspektor-gadget source path %q", cwd, inspektorGadetSrcPath)
 		}
+		gadgetRelativePath := strings.TrimPrefix(cwd, inspektorGadetSrcPath)
+		gadgetSourcePath = filepath.Join("/work", gadgetRelativePath)
 
-		if found {
-			break
-		}
-	}
-
-	if !found {
-		fmt.Printf("Pulling builder image %s. It could take few minutes.\n", opts.builderImage)
-		reader, err := cli.ImagePull(ctx, opts.builderImage, image.PullOptions{})
-		if err != nil {
-			return fmt.Errorf("pulling builder image: %w", err)
-		}
-		io.Copy(io.Discard, reader)
-		reader.Close()
+		// use in-tree headers too
+		conf.CFlags += " -I /work/include/"
 	}
 
 	wasmFullPath := ""
 	if conf.Wasm != "" {
-		wasmFullPath = filepath.Join("/work", conf.Wasm)
+		wasmFullPath = filepath.Join(gadgetSourcePath, conf.Wasm)
 	}
+
+	cmd := buildCmd("/out", filepath.Join(gadgetSourcePath, conf.EBPFSource),
+		wasmFullPath, conf.CFlags, "/btfhub-archive", opts.btfgen)
+
+	mounts := []mount.Mount{
+		{
+			Type:     mount.TypeBind,
+			Target:   "/work",
+			Source:   pathHost,
+			ReadOnly: true,
+		},
+		{
+			Type:   mount.TypeBind,
+			Target: "/out",
+			Source: opts.outputDir,
+		},
+	}
+
+	if opts.btfgen {
+		mounts = append(mounts, mount.Mount{
+			Type:   mount.TypeBind,
+			Target: "/btfhub-archive",
+			Source: opts.btfhubarchive,
+		})
+	}
+
 	resp, err := cli.ContainerCreate(
 		ctx,
 		&container.Config{
-			Image: opts.builderImage,
-			Cmd: []string{
-				"make", "-f", "/Makefile", "-j", fmt.Sprintf("%d", runtime.NumCPU()),
-				"EBPFSOURCE=" + filepath.Join("/work", conf.EBPFSource),
-				"WASM=" + wasmFullPath,
-				"OUTPUTDIR=/out",
-				"CFLAGS=" + conf.CFlags,
-			},
-			User: fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
+			Image:      opts.builderImage,
+			Cmd:        cmd,
+			WorkingDir: gadgetSourcePath,
+			User:       fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
 		},
 		&container.HostConfig{
-			Mounts: []mount.Mount{
-				{
-					Type:     mount.TypeBind,
-					Target:   "/work",
-					Source:   cwd,
-					ReadOnly: true,
-				},
-				{
-					Type:   mount.TypeBind,
-					Target: "/out",
-					Source: output,
-				},
-			},
+			Mounts: mounts,
 		},
 		nil, nil, "",
 	)

@@ -1,4 +1,4 @@
-// Copyright 2023 The Inspektor Gadget authors
+// Copyright 2023-2024 The Inspektor Gadget authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,8 +16,8 @@ package grpcruntime
 
 import (
 	"context"
+	"crypto/tls"
 	_ "embed"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -29,19 +29,21 @@ import (
 
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
 	"github.com/inspektor-gadget/inspektor-gadget/internal/deployinfo"
+	"github.com/inspektor-gadget/inspektor-gadget/pkg/environment"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/gadget-service/api"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/gadgets"
-	runTypes "github.com/inspektor-gadget/inspektor-gadget/pkg/gadgets/run/types"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/logger"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/operators"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/params"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/runtime"
+	gadgettls "github.com/inspektor-gadget/inspektor-gadget/pkg/utils/tls"
 )
 
 type ConnectionMode int
@@ -62,6 +64,16 @@ const (
 	ParamRemoteAddress     = "remote-address"
 	ParamConnectionMethod  = "connection-method"
 	ParamConnectionTimeout = "connection-timeout"
+	ParamID                = "id"
+	ParamDetach            = "detach"
+	ParamTags              = "tags"
+	ParamName              = "name"
+	ParamEventBufferLength = "event-buffer-length"
+
+	ParamTLSKey        = "tls-key-file"
+	ParamTLSCert       = "tls-cert-file"
+	ParamTLSServerCA   = "tls-server-ca-file"
+	ParamTLSServerName = "tls-server-name"
 
 	// ParamGadgetServiceTCPPort is only used in combination with KubernetesProxyConnectionMethodTCP
 	ParamGadgetServiceTCPPort = "tcp-port"
@@ -104,6 +116,10 @@ func New(options ...Option) *Runtime {
 }
 
 func (r *Runtime) Init(runtimeGlobalParams *params.Params) error {
+	if runtimeGlobalParams == nil {
+		runtimeGlobalParams = r.GlobalParamDescs().ToParams()
+	}
+
 	// overwrite only if not yet initialized; for gadgetctl, this initialization happens
 	// already in the main.go to specify a target address
 	if r.globalParams == nil {
@@ -136,6 +152,44 @@ func checkForDuplicates(subject string) func(value string) error {
 
 func (r *Runtime) ParamDescs() params.ParamDescs {
 	p := params.ParamDescs{}
+
+	// Currently detaching is only available for local environment (e.g. gadgetctl)
+	if environment.Environment == environment.Local {
+		p.Add(params.ParamDescs{
+			{
+				Key:          ParamDetach,
+				Description:  "Create a headless gadget instance that will keep running in the background",
+				TypeHint:     params.TypeBool,
+				DefaultValue: "false",
+				Tags:         []string{"!attach"},
+			},
+			{
+				Key:         ParamTags,
+				Description: "Comma-separated list of tags to apply to the gadget instance",
+				TypeHint:    params.TypeString,
+				Tags:        []string{"!attach"},
+			},
+			{
+				Key:         ParamName,
+				Description: "Distinctive name to assign to the gadget instance",
+				TypeHint:    params.TypeString,
+				Tags:        []string{"!attach"},
+			},
+			{
+				Key:         ParamID,
+				Description: "ID to assign to the gadget instance; if unset, it will be generated",
+				TypeHint:    params.TypeString,
+				Tags:        []string{"!attach"},
+			},
+			{
+				Key:          ParamEventBufferLength,
+				Description:  "Number of events to buffer on the server so they can be replayed when attaching; used with --detach; 0 = use server settings",
+				TypeHint:     params.TypeInt,
+				DefaultValue: "0",
+				Tags:         []string{"!attach"},
+			},
+		}...)
+	}
 	switch r.connectionMode {
 	case ConnectionModeDirect:
 		return p
@@ -169,6 +223,26 @@ func (r *Runtime) GlobalParamDescs() params.ParamDescs {
 				Description:  "Comma-separated list of remote address (gRPC) to connect to",
 				DefaultValue: api.DefaultDaemonPath,
 				Validator:    checkForDuplicates("address"),
+			},
+			{
+				Key:         ParamTLSKey,
+				Description: "TLS client key",
+				TypeHint:    params.TypeString,
+			},
+			{
+				Key:         ParamTLSCert,
+				Description: "TLS client certificate",
+				TypeHint:    params.TypeString,
+			},
+			{
+				Key:         ParamTLSServerCA,
+				Description: "TLS server CA certificate",
+				TypeHint:    params.TypeString,
+			},
+			{
+				Key:         ParamTLSServerName,
+				Description: "override TLS server name (if omitted, using target server name)",
+				TypeHint:    params.TypeString,
 			},
 		}...)
 		return p
@@ -276,41 +350,7 @@ func (r *Runtime) getTargets(ctx context.Context, params *params.Params) ([]targ
 	return nil, fmt.Errorf("unsupported connection mode")
 }
 
-func (r *Runtime) GetGadgetInfo(ctx context.Context, desc gadgets.GadgetDesc, gadgetParams *params.Params, args []string) (*runTypes.GadgetInfo, error) {
-	timeout := time.Second * time.Duration(r.globalParams.Get(ParamConnectionTimeout).AsUint16())
-	ctx, cancelDial := context.WithTimeout(ctx, timeout)
-	defer cancelDial()
-
-	// use default params for now
-	params := r.ParamDescs().ToParams()
-	conn, err := r.getConnToRandomTarget(ctx, params)
-	if err != nil {
-		return nil, fmt.Errorf("dialing random target: %w", err)
-	}
-	defer conn.Close()
-	client := api.NewGadgetManagerClient(conn)
-
-	allParams := make(map[string]string)
-	gadgetParams.CopyToMap(allParams, "")
-
-	in := &api.GetGadgetInfoRequest{
-		Params: allParams,
-		Args:   args,
-	}
-	out, err := client.GetGadgetInfo(ctx, in)
-	if err != nil {
-		return nil, fmt.Errorf("getting gadget info: %w", err)
-	}
-
-	ret := &runTypes.GadgetInfo{}
-	if err := json.Unmarshal(out.Info, ret); err != nil {
-		return nil, fmt.Errorf("unmarshaling gadget info: %w", err)
-	}
-
-	return ret, nil
-}
-
-func (r *Runtime) RunGadget(gadgetCtx runtime.GadgetContext) (runtime.CombinedGadgetResult, error) {
+func (r *Runtime) RunBuiltInGadget(gadgetCtx runtime.GadgetContext) (runtime.CombinedGadgetResult, error) {
 	paramMap := make(map[string]string)
 	gadgets.ParamsToMap(
 		paramMap,
@@ -328,7 +368,7 @@ func (r *Runtime) RunGadget(gadgetCtx runtime.GadgetContext) (runtime.CombinedGa
 	if err != nil {
 		return nil, fmt.Errorf("getting target nodes: %w", err)
 	}
-	return r.runGadgetOnTargets(gadgetCtx, paramMap, targets)
+	return r.runBuiltInGadgetOnTargets(gadgetCtx, paramMap, targets)
 }
 
 func (r *Runtime) getConnToRandomTarget(ctx context.Context, runtimeParams *params.Params) (*grpc.ClientConn, error) {
@@ -350,18 +390,23 @@ func (r *Runtime) getConnToRandomTarget(ctx context.Context, runtimeParams *para
 	return conn, nil
 }
 
-func (r *Runtime) runGadgetOnTargets(
+func (r *Runtime) getConnFromTarget(ctx context.Context, runtimeParams *params.Params, target target) (*grpc.ClientConn, error) {
+	log.Debugf("using target %q (%q)", target.addressOrPod, target.node)
+
+	timeout := time.Second * time.Duration(r.globalParams.Get(ParamConnectionTimeout).AsUint16())
+	conn, err := r.dialContext(ctx, target, timeout)
+	if err != nil {
+		return nil, fmt.Errorf("dialing %q (%q): %w", target.addressOrPod, target.node, err)
+	}
+	return conn, nil
+}
+
+func (r *Runtime) runBuiltInGadgetOnTargets(
 	gadgetCtx runtime.GadgetContext,
 	paramMap map[string]string,
 	targets []target,
 ) (runtime.CombinedGadgetResult, error) {
-	var gType gadgets.GadgetType
-
-	if info := gadgetCtx.GadgetInfo(); info != nil {
-		gType = info.GadgetType
-	} else {
-		gType = gadgetCtx.GadgetDesc().Type()
-	}
+	gType := gadgetCtx.GadgetDesc().Type()
 
 	if gType == gadgets.TypeTraceIntervals {
 		gadgetCtx.Parser().EnableSnapshots(
@@ -385,7 +430,7 @@ func (r *Runtime) runGadgetOnTargets(
 		wg.Add(1)
 		go func(target target) {
 			gadgetCtx.Logger().Debugf("running gadget on node %q", target.node)
-			res, err := r.runGadget(gadgetCtx, target, paramMap)
+			res, err := r.runBuiltInGadget(gadgetCtx, target, paramMap)
 			resultsLock.Lock()
 			results[target.node] = &runtime.GadgetResult{
 				Payload: res,
@@ -402,8 +447,68 @@ func (r *Runtime) runGadgetOnTargets(
 
 func (r *Runtime) dialContext(dialCtx context.Context, target target, timeout time.Duration) (*grpc.ClientConn, error) {
 	opts := []grpc.DialOption{
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		//nolint:staticcheck
 		grpc.WithBlock(),
+		//nolint:staticcheck
+		grpc.WithReturnConnectionError(),
+	}
+
+	tlsKey := r.globalParams.Get(ParamTLSKey).String()
+	tlsCert := r.globalParams.Get(ParamTLSCert).String()
+	tlsCA := r.globalParams.Get(ParamTLSServerCA).String()
+
+	tlsOptionsSet := 0
+	for _, tlsOption := range []string{tlsKey, tlsCert, tlsCA} {
+		if len(tlsOption) != 0 {
+			tlsOptionsSet++
+		}
+	}
+
+	if tlsOptionsSet > 1 && tlsOptionsSet < 3 {
+		return nil, fmt.Errorf(`
+missing at least one the TLS related options:
+	* %s: %q
+	* %s: %q
+	* %s: %q
+All these options should be set at the same time to enable TLS connection`,
+			ParamTLSKey, tlsKey,
+			ParamTLSCert, tlsCert,
+			ParamTLSServerCA, tlsCA)
+	}
+
+	if tlsOptionsSet == 3 {
+		cert, err := gadgettls.LoadTLSCert(tlsCert, tlsKey)
+		if err != nil {
+			return nil, fmt.Errorf("creating TLS certificate: %w", err)
+		}
+
+		ca, err := gadgettls.LoadTLSCA(tlsCA)
+		if err != nil {
+			return nil, fmt.Errorf("creating TLS certificate authority: %w", err)
+		}
+
+		purl, err := url.Parse(target.addressOrPod)
+		if err != nil {
+			return nil, fmt.Errorf("parsing address %v: %w", target.addressOrPod, err)
+		}
+
+		tlsConfig := &tls.Config{
+			ServerName:   purl.Hostname(),
+			Certificates: []tls.Certificate{cert},
+			RootCAs:      ca,
+		}
+
+		if serverName := r.globalParams.Get(ParamTLSServerName).String(); serverName != "" {
+			tlsConfig.ServerName = serverName
+		}
+
+		if tlsConfig.ServerName == "" {
+			return nil, fmt.Errorf("invalid hostname, use %s to override", ParamTLSServerName)
+		}
+
+		opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)))
+	} else {
+		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
 
 	// If we're in Kubernetes connection mode, we need a custom dialer
@@ -413,8 +518,13 @@ func (r *Runtime) dialContext(dialCtx context.Context, target target, timeout ti
 			gadgetNamespace := r.globalParams.Get(ParamGadgetNamespace).AsString()
 			return NewK8SPortFwdConn(ctx, r.restConfig, gadgetNamespace, target, port, timeout)
 		}))
+	} else {
+		newCtx, cancel := context.WithTimeout(dialCtx, timeout)
+		defer cancel()
+		dialCtx = newCtx
 	}
 
+	//nolint:staticcheck
 	conn, err := grpc.DialContext(dialCtx, "passthrough:///"+target.addressOrPod, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("dialing %q (%q): %w", target.addressOrPod, target.node, err)
@@ -422,7 +532,7 @@ func (r *Runtime) dialContext(dialCtx context.Context, target target, timeout ti
 	return conn, nil
 }
 
-func (r *Runtime) runGadget(gadgetCtx runtime.GadgetContext, target target, allParams map[string]string) ([]byte, error) {
+func (r *Runtime) runBuiltInGadget(gadgetCtx runtime.GadgetContext, target target, allParams map[string]string) ([]byte, error) {
 	// Notice that we cannot use gadgetCtx.Context() here, as that would - when cancelled by the user - also cancel the
 	// underlying gRPC connection. That would then lead to results not being received anymore (mostly for profile
 	// gadgets.)
@@ -438,9 +548,9 @@ func (r *Runtime) runGadget(gadgetCtx runtime.GadgetContext, target target, allP
 		return nil, fmt.Errorf("dialing target on node %q: %w", target.node, err)
 	}
 	defer conn.Close()
-	client := api.NewGadgetManagerClient(conn)
+	client := api.NewBuiltInGadgetManagerClient(conn)
 
-	runRequest := &api.GadgetRunRequest{
+	runRequest := &api.BuiltInGadgetRunRequest{
 		GadgetName:     gadgetCtx.GadgetDesc().Name(),
 		GadgetCategory: gadgetCtx.GadgetDesc().Category(),
 		Params:         allParams,
@@ -451,12 +561,12 @@ func (r *Runtime) runGadget(gadgetCtx runtime.GadgetContext, target target, allP
 		Timeout:        int64(gadgetCtx.Timeout()),
 	}
 
-	runClient, err := client.RunGadget(connCtx)
+	runClient, err := client.RunBuiltInGadget(connCtx)
 	if err != nil && !errors.Is(err, context.Canceled) {
 		return nil, err
 	}
 
-	controlRequest := &api.GadgetControlRequest{Event: &api.GadgetControlRequest_RunRequest{RunRequest: runRequest}}
+	controlRequest := &api.BuiltInGadgetControlRequest{Event: &api.BuiltInGadgetControlRequest_RunRequest{RunRequest: runRequest}}
 	err = runClient.Send(controlRequest)
 	if err != nil {
 		return nil, err
@@ -531,7 +641,7 @@ func (r *Runtime) runGadget(gadgetCtx runtime.GadgetContext, target target, allP
 	case <-gadgetCtx.Context().Done():
 		// Send stop request
 		gadgetCtx.Logger().Debugf("%-20s | sending stop request", target.node)
-		controlRequest := &api.GadgetControlRequest{Event: &api.GadgetControlRequest_StopRequest{StopRequest: &api.GadgetStopRequest{}}}
+		controlRequest := &api.BuiltInGadgetControlRequest{Event: &api.BuiltInGadgetControlRequest_StopRequest{StopRequest: &api.BuiltInGadgetStopRequest{}}}
 		runClient.Send(controlRequest)
 
 		// Wait for done or timeout

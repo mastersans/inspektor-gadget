@@ -1,4 +1,4 @@
-// Copyright 2019-2023 The Inspektor Gadget authors
+// Copyright 2019-2024 The Inspektor Gadget authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -37,16 +37,28 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 
+	// Import this early to set the environment variable before any other package is imported
+	_ "github.com/inspektor-gadget/inspektor-gadget/pkg/environment/k8s"
+
 	// This is a blank include that actually imports all gadgets
 	_ "github.com/inspektor-gadget/inspektor-gadget/pkg/all-gadgets"
+	"github.com/inspektor-gadget/inspektor-gadget/pkg/config"
+	"github.com/inspektor-gadget/inspektor-gadget/pkg/config/gadgettracermanagerconfig"
+	"github.com/inspektor-gadget/inspektor-gadget/pkg/operators"
+	ocihandler "github.com/inspektor-gadget/inspektor-gadget/pkg/operators/oci-handler"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/utils/experimental"
 
-	// The script gadget is designed only to work in k8s, hence it's not part of all-gadgets
-	_ "github.com/inspektor-gadget/inspektor-gadget/pkg/gadgets/script"
-
 	// Blank import for some operators
+	_ "github.com/inspektor-gadget/inspektor-gadget/pkg/operators/btfgen"
+	_ "github.com/inspektor-gadget/inspektor-gadget/pkg/operators/ebpf"
+	_ "github.com/inspektor-gadget/inspektor-gadget/pkg/operators/filter"
+	_ "github.com/inspektor-gadget/inspektor-gadget/pkg/operators/formatters"
 	_ "github.com/inspektor-gadget/inspektor-gadget/pkg/operators/kubemanager"
+	_ "github.com/inspektor-gadget/inspektor-gadget/pkg/operators/limiter"
 	_ "github.com/inspektor-gadget/inspektor-gadget/pkg/operators/socketenricher"
+	_ "github.com/inspektor-gadget/inspektor-gadget/pkg/operators/sort"
+	_ "github.com/inspektor-gadget/inspektor-gadget/pkg/operators/uidgidresolver"
+	_ "github.com/inspektor-gadget/inspektor-gadget/pkg/operators/wasm"
 
 	gadgetservice "github.com/inspektor-gadget/inspektor-gadget/pkg/gadget-service"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/gadget-service/api"
@@ -130,6 +142,7 @@ func main() {
 	var conn *grpc.ClientConn
 	if liveness || dump != "" || method != "" {
 		var err error
+		//nolint:staticcheck
 		conn, err = grpc.Dial("unix://"+socketfile, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
 			log.Fatalf("fail to dial: %v", err)
@@ -265,6 +278,14 @@ func main() {
 		if experimental.Enabled() {
 			log.Info("Experimental features enabled")
 		}
+
+		config.Config = config.NewWithPath(gadgettracermanagerconfig.ConfigPath)
+		if err := config.Config.ReadInConfig(); err != nil {
+			log.Warnf("reading config: %v", err)
+		}
+
+		operators.RegisterDataOperator(ocihandler.OciHandler)
+
 		hostConfig := host.Config{
 			AutoMountFilesystems: true,
 		}
@@ -283,6 +304,11 @@ func main() {
 			log.Fatalf("Detecting net namespace: %v", err)
 		}
 		log.Infof("HostNetwork=%t", hostNetNs)
+		hostCgroupNs, err := host.IsHostCgroupNs()
+		if err != nil {
+			log.Fatalf("Detecting cgroup namespace: %v", err)
+		}
+		log.Infof("HostCgroup=%t", hostCgroupNs)
 
 		node := os.Getenv("NODE_NAME")
 		if node == "" {
@@ -304,7 +330,6 @@ func main() {
 			HookMode:            hookMode,
 			FallbackPodInformer: fallbackPodInformer,
 		})
-
 		if err != nil {
 			log.Fatalf("failed to create Gadget Tracer Manager server: %v", err)
 		}
@@ -321,16 +346,21 @@ func main() {
 			go startController(node, tracerManager)
 		}
 
-		stringBufferLength := os.Getenv("EVENTS_BUFFER_LENGTH")
+		stringBufferLength := config.Config.GetString(gadgettracermanagerconfig.EventsBufferLengthKey)
 		if stringBufferLength == "" {
-			log.Fatalf("Environment variable EVENTS_BUFFER_LENGTH not set")
+			log.Warnf("EVENTS_BUFFER_LENGTH is deprecated. Use %q instead in configmap", gadgettracermanagerconfig.EventsBufferLengthKey)
+			stringBufferLength = os.Getenv("EVENTS_BUFFER_LENGTH")
+		}
+		if stringBufferLength == "" {
+			log.Fatalf("Environment variable EVENTS_BUFFER_LENGTH or config not set")
 		}
 
 		bufferLength, err := strconv.ParseUint(stringBufferLength, 10, 64)
 		if err != nil {
 			log.Fatalf("Parsing EVENTS_BUFFER_LENGTH %q: %v", stringBufferLength, err)
 		}
-		service := gadgetservice.NewService(log.StandardLogger(), bufferLength)
+		service := gadgetservice.NewService(log.StandardLogger())
+		service.SetEventBufferLength(bufferLength)
 
 		socketType, socketPath, err := api.ParseSocketAddress(gadgetServiceHost)
 		if err != nil {

@@ -1,4 +1,4 @@
-// Copyright 2019-2023 The Inspektor Gadget authors
+// Copyright 2019-2024 The Inspektor Gadget authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -29,13 +29,12 @@ import (
 	commonutils "github.com/inspektor-gadget/inspektor-gadget/cmd/common/utils"
 	"github.com/inspektor-gadget/inspektor-gadget/cmd/kubectl-gadget/advise"
 	"github.com/inspektor-gadget/inspektor-gadget/cmd/kubectl-gadget/utils"
+	igconfig "github.com/inspektor-gadget/inspektor-gadget/pkg/config"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/gadgets"
 	grpcruntime "github.com/inspektor-gadget/inspektor-gadget/pkg/runtime/grpc"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/utils/experimental"
 
 	_ "github.com/inspektor-gadget/inspektor-gadget/pkg/all-gadgets"
-	// The script is not included in the all gadgets package.
-	_ "github.com/inspektor-gadget/inspektor-gadget/pkg/gadgets/script"
 )
 
 // common params for all gadgets
@@ -50,8 +49,6 @@ var rootCmd = &cobra.Command{
 	Short: "Collection of gadgets for Kubernetes developers",
 }
 
-var infoSkipCommands = []string{"deploy", "undeploy", "version"}
-
 func init() {
 	utils.FlagInit(rootCmd)
 }
@@ -61,75 +58,101 @@ func main() {
 		log.Info("Experimental features enabled")
 	}
 
+	common.AddConfigFlag(rootCmd)
 	common.AddVerboseFlag(rootCmd)
 
-	// grpcruntime.New() will try to fetch the info from the cluster by
-	// default. Make sure we don't do this when certain commands are run
-	// (as they just don't need it or imply that there are no nodes to
-	// contact, yet).
-	skipInfo := false
+	// Some commands don't need the gadget namespace. Run then before to avoid
+	// printing warnings about gadget namespace not found.
+	needGadgetNamespace := true
 	isHelp := false
-	isVersion := false
-	isDeployUndeploy := false
-	for _, arg := range os.Args[1:] {
-		for _, skipCmd := range infoSkipCommands {
-			if arg == skipCmd {
-				skipInfo = true
-			}
-		}
 
-		isVersion = isVersion || arg == "version"
-		isDeployUndeploy = isDeployUndeploy || arg == "deploy" || arg == "undeploy"
-		isHelp = isHelp || arg == "--help" || arg == "-h"
+	if len(os.Args) == 1 {
+		isHelp = true
 	}
+
+	// Need to loop through all arguments to skip flags...
+	for _, arg := range os.Args[1:] {
+		switch arg {
+		case "completion", "deploy", "version":
+			needGadgetNamespace = false
+		case "--help", "-h", "help":
+			isHelp = true
+		}
+	}
+
+	// save the root flags for later use before we modify them (e.g. add runtime flags)
+	rootFlags := commonutils.CopyFlagSet(rootCmd.PersistentFlags())
 
 	grpcRuntime = grpcruntime.New(grpcruntime.WithConnectUsingK8SProxy)
 	runtimeGlobalParams = grpcRuntime.GlobalParamDescs().ToParams()
 	common.AddFlags(rootCmd, runtimeGlobalParams, nil, grpcRuntime)
 	grpcRuntime.Init(runtimeGlobalParams)
-	config, err := utils.KubernetesConfigFlags.ToRESTConfig()
-	if err != nil {
-		log.Fatalf("Creating RESTConfig: %s", err)
-	}
-	grpcRuntime.SetRestConfig(config)
 
 	// evaluate flags early for runtimeGlobalParams; this will make
 	// sure that all flags relevant for the grpc connection are ready
 	// to be used
 
-	err = commonutils.ParseEarlyFlags(rootCmd, os.Args[1:])
+	err := commonutils.ParseEarlyFlags(rootCmd, os.Args[1:])
 	if err != nil {
 		// Analogous to cobra error message
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
-	if !isHelp && !isDeployUndeploy && !runtimeGlobalParams.Get(grpcruntime.ParamGadgetNamespace).IsSet() {
-		gadgetNamespaces, err := utils.GetRunningGadgetNamespaces()
-		if err != nil {
-			log.Fatalf("Searching for running Inspektor Gadget instances: %s", err)
-		}
-
-		switch len(gadgetNamespaces) {
-		case 0:
-			if !isVersion {
-				log.Fatalf("No running Inspektor Gadget instances found")
-			}
-		case 1:
-			// Exactly one running gadget instance found, use it
-			runtimeGlobalParams.Set(grpcruntime.ParamGadgetNamespace, gadgetNamespaces[0])
-		default:
-			// Multiple running gadget instances found, error out
-			log.Fatalf("Multiple running Inspektor Gadget instances found in following namespaces: %v", gadgetNamespaces)
-		}
+	// ensure that the runtime flags are set from the config file
+	if err = common.InitConfig(rootFlags); err != nil {
+		log.Fatalf("initializing config: %v", err)
+	}
+	if err = common.SetFlagsForParams(rootCmd, runtimeGlobalParams, igconfig.RuntimeKey); err != nil {
+		log.Fatalf("setting runtime flags from config: %v", err)
 	}
 
-	if !skipInfo {
-		grpcRuntime.InitDeployInfo()
+	config, err := utils.KubernetesConfigFlags.ToRESTConfig()
+	if err != nil {
+		log.Fatalf("Creating RESTConfig: %s", err)
 	}
+	grpcRuntime.SetRestConfig(config)
 
 	namespace, _ := utils.GetNamespace()
 	grpcRuntime.SetDefaultValue(gadgets.K8SNamespace, namespace)
+
+	// Execute commands that don't need the namespace early
+	if !needGadgetNamespace {
+		if err := rootCmd.Execute(); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
+
+	if !runtimeGlobalParams.Get(grpcruntime.ParamGadgetNamespace).IsSet() {
+		gadgetNamespaces, err := utils.GetRunningGadgetNamespaces()
+		if err != nil {
+			log.Warnf("Failed to get gadget namespace, using \"gadget\" by default.")
+		} else {
+			switch len(gadgetNamespaces) {
+			case 0:
+				log.Warn("No running Inspektor Gadget instances found.")
+			case 1:
+				// Exactly one running gadget instance found, use it
+				runtimeGlobalParams.Set(grpcruntime.ParamGadgetNamespace, gadgetNamespaces[0])
+			default:
+				// Multiple running gadget instances found, error out
+				log.Warnf("Multiple running Inspektor Gadget instances found in following namespaces: %v", gadgetNamespaces)
+				// avoid using wrong gadget namespace
+				if !isHelp {
+					os.Exit(1)
+				}
+			}
+		}
+	}
+
+	info, err := grpcRuntime.InitDeployInfo()
+	if err != nil {
+		log.Warnf("Failed to load deploy info: %s", err)
+	} else if err := commonutils.CheckServerVersionSkew(info.ServerVersion); err != nil {
+		log.Warnf(err.Error())
+	}
+
 	gadgetNamespace := runtimeGlobalParams.Get(grpcruntime.ParamGadgetNamespace).AsString()
 
 	hiddenColumnTags := []string{"runtime"}
@@ -139,6 +162,8 @@ func main() {
 	rootCmd.AddCommand(advise.NewAdviseCmd(gadgetNamespace))
 	rootCmd.AddCommand(NewTraceloopCmd(gadgetNamespace))
 	rootCmd.AddCommand(common.NewSyncCommand(grpcRuntime))
+	rootCmd.AddCommand(common.NewRunCommand(rootCmd, grpcRuntime, hiddenColumnTags, common.CommandModeRun))
+	rootCmd.AddCommand(common.NewConfigCmd(grpcRuntime, rootFlags))
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

@@ -1,0 +1,29 @@
+# Artifact Hub package metadata file
+version: 0.33.0
+name: "trace malloc"
+category: monitoring-logging
+displayName: "trace malloc"
+createdAt: "2024-10-08T09:57:54Z"
+digest: "2024-10-08T09:57:54Z"
+description: "use uprobe to trace malloc and free in libc.so"
+logoURL: "https://inspektor-gadget.io/media/brand-icon.svg"
+license: ""
+homeURL: "https://inspektor-gadget.io/"
+containersImages:
+    - name: gadget
+      image: "ghcr.io/inspektor-gadget/gadget/trace_malloc:latest"
+      platforms:
+        - linux/amd64
+        - linux/arm64
+keywords:
+    - gadget
+links:
+    - name: source
+      url: "https://github.com/inspektor-gadget/inspektor-gadget/"
+install: |
+    # Run
+    ```bash
+    sudo ig run ghcr.io/inspektor-gadget/gadget/trace_malloc:latest
+    ```
+provider:
+    name: Inspektor Gadget

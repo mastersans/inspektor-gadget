@@ -1,4 +1,4 @@
-// Copyright 2022-2023 The Inspektor Gadget authors
+// Copyright 2022-2024 The Inspektor Gadget authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,12 +18,20 @@ import (
 	"context"
 	"time"
 
+	"oras.land/oras-go/v2"
+
+	"github.com/inspektor-gadget/inspektor-gadget/pkg/datasource"
+	"github.com/inspektor-gadget/inspektor-gadget/pkg/gadget-service/api"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/gadgets"
-	runTypes "github.com/inspektor-gadget/inspektor-gadget/pkg/gadgets/run/types"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/logger"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/operators"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/params"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/parser"
+)
+
+const (
+	// NumRunTargets is the number of targets that the gadget will run on
+	NumRunTargets = "n-run-targets"
 )
 
 type GadgetContext interface {
@@ -38,7 +46,26 @@ type GadgetContext interface {
 	Args() []string
 	OperatorsParamCollection() params.Collection
 	Timeout() time.Duration
-	GadgetInfo() *runTypes.GadgetInfo
+	UseInstance() bool
+
+	Cancel()
+	ImageName() string
+	RegisterDataSource(datasource.Type, string) (datasource.DataSource, error)
+	GetDataSources() map[string]datasource.DataSource
+	GetAllDataSources() map[string]datasource.DataSource
+	SetVar(string, any)
+	GetVar(string) (any, bool)
+	SerializeGadgetInfo() (*api.GadgetInfo, error)
+	LoadGadgetInfo(info *api.GadgetInfo, paramValues api.ParamValues, run bool) error
+	Params() []*api.Param
+	SetMetadata([]byte)
+	SetParams([]*api.Param)
+	DataOperators() []operators.DataOperator
+	OrasTarget() oras.ReadOnlyTarget
+	IsRemoteCall() bool
+
+	Run(paramValues api.ParamValues) error
+	PrepareGadgetInfo(paramValues api.ParamValues) error
 }
 
 // GadgetResult contains the (optional) payload and error of a gadget run for a node
@@ -88,10 +115,13 @@ type Runtime interface {
 	Close() error
 	GlobalParamDescs() params.ParamDescs
 	ParamDescs() params.ParamDescs
-	// GetGadgetInfo returns information about the gadget that is being run. It only makes sense
-	// for the run gadget.
-	GetGadgetInfo(context.Context, gadgets.GadgetDesc, *params.Params, []string) (*runTypes.GadgetInfo, error)
-	RunGadget(gadgetCtx GadgetContext) (CombinedGadgetResult, error)
+
+	// GetGadgetInfo returns information about the gadget and used operators; this info potentially comes
+	// from a cache
+	GetGadgetInfo(gadgetCtx GadgetContext, runtimeParams *params.Params, paramValueMap api.ParamValues) (*api.GadgetInfo, error)
+
+	RunBuiltInGadget(gadgetCtx GadgetContext) (CombinedGadgetResult, error)
+	RunGadget(gadgetCtx GadgetContext, runtimeParams *params.Params, paramValueMap api.ParamValues) error
 	GetCatalog() (*Catalog, error)
 	SetDefaultValue(params.ValueHint, string)
 	GetDefaultValue(params.ValueHint) (string, bool)
