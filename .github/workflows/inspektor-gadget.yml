@@ -1440,6 +1440,53 @@ jobs:
           test-step-conclusion: ${{ steps.gadgets-tests.conclusion }}
           test-summary-suffix: "gadgets-unittest"
 
+  gadgets-kernel-unittest:
+    name: Test gadgets on different kernel versions
+    needs:
+      - build-and-push-gadgets
+      - build-helper-images
+      - check-secrets
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        kernel: [5.4, 5.10, 6.1]
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Setup go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: true
+      id: go
+    - name: Set up QEMU
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y qemu-system-x86
+        sudo chmod 666 /dev/kvm
+    - name: Install vimto
+      run: |
+        CGO_ENABLED=0 go install lmb.io/vimto@latest
+    - name: Run gadget unit tests for kernel ${{ matrix.kernel }}
+      id: gadgets-kernel-tests
+      shell: bash
+      run: |
+        set -o pipefail
+        make \
+        GADGET_REPOSITORY=${{ steps.set-repo-determine-image-tag.outputs.gadget-repository }} \
+        GADGET_TAG=${{ steps.set-repo-determine-image-tag.outputs.gadget-tag }} \
+        IG_VERIFY_IMAGE=${{ needs.check-secrets.outputs.cosign }} \
+        -C gadgets/ ${{ matrix.kernel }}/test-kernel -o build |& tee gadgets-kernel-tests.log & wait $! 
+    - name: Prepare and publish test reports
+      if: always()
+      continue-on-error: true
+      uses: ./.github/actions/prepare-and-publish-test-reports
+      with:
+        test-log-file: gadgets-kernel-tests.log
+        test-step-conclusion: ${{ steps.gadgets-kernel-tests.conclusion }}
+        test-summary-suffix: "gadgets-kernel-unittest"
+
   test-gadgets-local:
     name: Test gadgets locally
     #level 3
