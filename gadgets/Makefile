@@ -12,6 +12,7 @@ KUBECTL_GADGET ?= kubectl-gadget
 IG_RUNTIME ?= docker
 IG_FLAGS ?=
 COSIGN ?= cosign
+VIMTO ?= vimto
 
 UNIT_TEST_DIR = test/unit
 INTEGRATION_TEST_DIR = test/integration
@@ -123,7 +124,8 @@ pull:
 	IG_VERIFY_IMAGE=$(IG_VERIFY_IMAGE) \
 	GADGET_TAG=$(GADGET_TAG) \
 	GADGET_REPOSITORY=$(GADGET_REPOSITORY) \
-	sudo -E vimto -kernel $(KERNEL_REPOSITORY):$* \
+	VIMTO=$(VIMTO) \
+	sudo -E $(VIMTO) -kernel $(KERNEL_REPOSITORY):$* \
 	-memory 4096M -- go test -v ./.../$(UNIT_TEST_DIR)/...
 
 .PHONY:
