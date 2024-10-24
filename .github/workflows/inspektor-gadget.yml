@@ -1461,9 +1461,8 @@ jobs:
         go-version: ${{ env.GO_VERSION }}
         cache: true
       id: go
-    # Ensure that GOPATH/bin is added to the PATH
     - name: Add GOPATH/bin to PATH
-      run: echo "${{ github.workspace }}/go/bin" >> $GITHUB_ENV
+      run: echo "PATH=\$PATH:$(go env GOPATH)/bin" >> $GITHUB_ENV
     - name: Set container repository and determine image tag
       id: set-repo-determine-image-tag
       uses: ./.github/actions/set-container-repo-and-determine-image-tag
