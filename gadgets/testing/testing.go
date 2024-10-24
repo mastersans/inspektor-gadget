@@ -17,6 +17,9 @@ package testing
 import (
 	"os"
 	"testing"
+
+	"github.com/cilium/ebpf/rlimit"
+	"github.com/stretchr/testify/require"
 )
 
 func RequireEnvironmentVariables(t testing.TB) {
@@ -26,5 +29,13 @@ func RequireEnvironmentVariables(t testing.TB) {
 
 	if os.Getenv("IG_RUNTIME") == "" {
 		t.Skip("environment variable IG_RUNTIME undefined")
+	}
+}
+
+func RemoveMemlock(t testing.TB) {
+	t.Helper()
+	// Some kernel versions need to have the memlock rlimit removed
+	if err := rlimit.RemoveMemlock(); err != nil {
+		require.NoError(t, err, "Failed to remove memlock rlimit: %s", err)
 	}
 }
