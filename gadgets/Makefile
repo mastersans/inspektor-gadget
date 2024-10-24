@@ -106,6 +106,8 @@ clean:
 
 .PHONY: pull
 pull:
+	GADGET_TAG=$(GADGET_TAG) \
+	GADGET_REPOSITORY=$(GADGET_REPOSITORY) \
 	for GADGET in $(GADGETS); do \
 		make $$GADGET/pull; \
 	done
@@ -119,6 +121,8 @@ pull:
 .PHONY: %/test-kernel
 %/test-kernel: pull
 	IG_VERIFY_IMAGE=$(IG_VERIFY_IMAGE) \
+	GADGET_TAG=$(GADGET_TAG) \
+	GADGET_REPOSITORY=$(GADGET_REPOSITORY) \
 	sudo -E vimto -kernel $(KERNEL_REPOSITORY):$* \
 	-sudo -memory 4096M -- go test -v ./.../$(UNIT_TEST_DIR)/...
 
