@@ -109,7 +109,7 @@ pull:
 	GADGET_TAG=$(GADGET_TAG) \
 	GADGET_REPOSITORY=$(GADGET_REPOSITORY) \
 	for GADGET in $(GADGETS); do \
-		make $$GADGET/pull; \
+		sudo -E $(IG) image pull $(GADGET_REPOSITORY)/$$GADGET:$(GADGET_TAG) \
 	done
 
 .PHONY: %/pull
