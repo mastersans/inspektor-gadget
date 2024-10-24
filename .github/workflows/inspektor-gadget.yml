@@ -1462,7 +1462,10 @@ jobs:
         cache: true
       id: go
     - name: Add GOPATH/bin to PATH
-      run: echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+      run: |
+        echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+        echo $PATH
+        export PATH=$PATH:$(go env GOPATH)/bin
     - name: Set container repository and determine image tag
       id: set-repo-determine-image-tag
       uses: ./.github/actions/set-container-repo-and-determine-image-tag
