@@ -104,27 +104,27 @@ clean:
 		sudo -E $(IG) image remove $(GADGET_REPOSITORY)/$$GADGET:$(GADGET_TAG); \
 	done
 
-.PHONY: pull
+.PHONY:
 pull:
 	GADGET_TAG=$(GADGET_TAG) \
-	GADGET_REPOSITORY=$(GADGET_REPOSITORY) \
+	GADGET_REPOSITORY=$(GADGET_REPOSITORY) && \
 	for GADGET in $(GADGETS); do \
-		sudo -E $(IG) image pull $(GADGET_REPOSITORY)/$$GADGET:$(GADGET_TAG) \
+		sudo -E $(IG) image pull $(GADGET_REPOSITORY)/$$GADGET:$(GADGET_TAG); \
 	done
 
-.PHONY: %/pull
+.PHONY:
 %/pull:
 	GADGET_TAG=$(GADGET_TAG) \
 	GADGET_REPOSITORY=$(GADGET_REPOSITORY) \
 	sudo -E $(IG) image pull $(GADGET_REPOSITORY)/$*:$(GADGET_TAG)
 
-.PHONY: %/test-kernel
+.PHONY:
 %/test-kernel: pull
 	IG_VERIFY_IMAGE=$(IG_VERIFY_IMAGE) \
 	GADGET_TAG=$(GADGET_TAG) \
 	GADGET_REPOSITORY=$(GADGET_REPOSITORY) \
 	sudo -E vimto -kernel $(KERNEL_REPOSITORY):$* \
-	-sudo -memory 4096M -- go test -v ./.../$(UNIT_TEST_DIR)/...
+	-memory 4096M -- go test -v ./.../$(UNIT_TEST_DIR)/...
 
 .PHONY:
 test-unit: build
