@@ -23,6 +23,7 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/stretchr/testify/require"
 
+	gadgettesting "github.com/inspektor-gadget/inspektor-gadget/gadgets/testing"
 	utilstest "github.com/inspektor-gadget/inspektor-gadget/internal/test"
 	containerutils "github.com/inspektor-gadget/inspektor-gadget/pkg/container-utils"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/testing/gadgetrunner"
@@ -47,6 +48,7 @@ type testDef struct {
 
 func TestSnapshotProcessGadget(t *testing.T) {
 	utilstest.RequireRoot(t)
+	gadgettesting.RemoveMemlock(t)
 	runnerConfig := &utilstest.RunnerConfig{}
 	testCases := map[string]testDef{
 		"captures_events_with_no_filter": {

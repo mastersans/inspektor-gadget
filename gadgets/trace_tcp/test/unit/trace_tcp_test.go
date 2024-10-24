@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	gadgettesting "github.com/inspektor-gadget/inspektor-gadget/gadgets/testing"
 	utilstest "github.com/inspektor-gadget/inspektor-gadget/internal/test"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/operators"
 	_ "github.com/inspektor-gadget/inspektor-gadget/pkg/operators/ebpf"
@@ -53,6 +54,7 @@ type testDef struct {
 
 func TestTraceTcpGadget(t *testing.T) {
 	utilstest.RequireRoot(t)
+	gadgettesting.RemoveMemlock(t)
 	testCases := map[string]testDef{
 		"captures_all_events": {
 			addr:          "127.0.0.1",

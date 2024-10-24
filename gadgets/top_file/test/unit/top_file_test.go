@@ -22,6 +22,7 @@ import (
 
 	"github.com/cilium/ebpf"
 
+	gadgettesting "github.com/inspektor-gadget/inspektor-gadget/gadgets/testing"
 	utilstest "github.com/inspektor-gadget/inspektor-gadget/internal/test"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/operators"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/testing/gadgetrunner"
@@ -53,6 +54,7 @@ type testDef struct {
 
 func TestTopFileGadget(t *testing.T) {
 	utilstest.RequireRoot(t)
+	gadgettesting.RemoveMemlock(t)
 	runnerConfig := &utilstest.RunnerConfig{}
 
 	testCases := map[string]testDef{
